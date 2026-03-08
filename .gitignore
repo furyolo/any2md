@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Generated outputs
+output/
+output.md
+
+# Tool caches and reports
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Claude files
+.claude/settings.local.json
+.claude/temp_*.txt
+
+# Virtual environments
+.venv
+.ace-tool/

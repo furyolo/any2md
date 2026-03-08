@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "any2md"
+version = "0.2.0"
+description = "Convert common document formats to Markdown from the CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ebooklib>=0.20",
+    "mammoth>=1.8.0",
+    "markdownify>=1.2.2",
+    "opencc-python-reimplemented>=0.1.7",
+    "pymupdf-layout>=1.27.1",
+    "pymupdf4llm>=0.3.4",
+]
+
+[project.scripts]
+any2md = "any2md.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple"
+default = true
