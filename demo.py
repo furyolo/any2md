@@ -12,6 +12,7 @@ def pdf_to_markdown(path: str) -> str:
 
 def epub_to_markdown(path: str) -> str:
     import re
+
     book = epub.read_epub(path)
     parts = []
     for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
@@ -29,7 +30,7 @@ _CONVERTERS = {
 }
 
 
-def convert(input_path: str, output_path: str = "output.md", t2s: bool = False) -> None:
+def convert(input_path: str, output_path: str | None = None, t2s: bool = False) -> None:
     ext = pathlib.Path(input_path).suffix.lower()
     converter = _CONVERTERS.get(ext)
     if converter is None:
@@ -37,9 +38,13 @@ def convert(input_path: str, output_path: str = "output.md", t2s: bool = False) 
     md_text = converter(input_path)
     if t2s:
         import opencc
+
         md_text = opencc.OpenCC("t2s").convert(md_text)
-    pathlib.Path(output_path).write_bytes(md_text.encode())
-    print(f"Saved to {output_path}")
+
+    target = pathlib.Path(output_path) if output_path else pathlib.Path("output") / f"{pathlib.Path(input_path).stem}.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(md_text.encode())
+    print(f"Saved to {target}")
 
 
 if __name__ == "__main__":

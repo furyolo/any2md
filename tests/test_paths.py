@@ -8,7 +8,7 @@ from any2md.paths import ensure_no_output_collisions, resolve_output_path
 
 
 class PathTests(unittest.TestCase):
-    def test_single_file_defaults_to_source_stem_md(self) -> None:
+    def test_single_file_defaults_to_output_directory(self) -> None:
         result = resolve_output_path(
             input_path=Path("/tmp/example.pdf"),
             batch_mode=False,
@@ -16,7 +16,7 @@ class PathTests(unittest.TestCase):
             raw_output_path=None,
             source_root=Path("/tmp"),
         )
-        self.assertEqual(result, Path("example.md"))
+        self.assertEqual(result, Path("output/example.md"))
 
     def test_single_file_directory_output_uses_input_stem(self) -> None:
         result = resolve_output_path(

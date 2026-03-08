@@ -1,4 +1,7 @@
-# any2md — Project Brief
+# any2md — 项目说明
+
+[![English](https://img.shields.io/badge/Docs-English-2d7ff9)](PROJECT_BRIEF.en.md)
+[![简体中文](https://img.shields.io/badge/文档-简体中文-e85d75)](PROJECT_BRIEF.md)
 
 ## 项目目标
 
@@ -29,7 +32,7 @@
 
 ## 输出与退出码约定
 
-- 单文件默认输出到当前工作目录下的 `<源文件主名>.md`
+- 单文件默认输出到 `output/<源文件主名>.md`
 - 单文件 `--output` 可为文件路径；若目标是已存在目录或路径以 `/`、`\\` 结尾，则输出到该目录下的 `<stem>.md`
 - 批量模式默认输出到 `output/` 目录，并保留相对目录结构
 - 已有输出默认不覆盖，需显式传入 `--force`

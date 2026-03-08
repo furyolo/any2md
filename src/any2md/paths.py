@@ -16,7 +16,7 @@ def resolve_output_path(
 ) -> Path:
     if not batch_mode:
         if output_path is None:
-            return Path(f"{input_path.stem}.md")
+            return Path("output") / f"{input_path.stem}.md"
         if is_directory_like_output(output_path, raw_output_path):
             return output_path / f"{input_path.stem}.md"
         return output_path

@@ -1,12 +1,48 @@
 # any2md
 
-A small CLI for converting common document formats into Markdown.
+[![English](https://img.shields.io/badge/Docs-English-2d7ff9)](README.md)
+[![简体中文](https://img.shields.io/badge/文档-简体中文-e85d75)](README.zh-CN.md)
 
-## Installation
+[![Version](https://img.shields.io/badge/version-0.2.0-2ea44f)](pyproject.toml)
+[![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![Interface](https://img.shields.io/badge/interface-CLI-5c6ac4)](main.py)
+
+Convert common document formats into Markdown from the command line.
+
+[![Project Brief EN](https://img.shields.io/badge/Project_Brief-English-2d7ff9)](PROJECT_BRIEF.en.md)
+[![项目说明](https://img.shields.io/badge/项目说明-简体中文-e85d75)](PROJECT_BRIEF.md)
+
+## Highlights
+
+- Convert `.pdf`, `.epub`, `.html`, `.txt`, `.docx`, and common image formats.
+- Support single-file conversion, batch directory conversion, and recursive scanning.
+- Use `--dry-run` for planning and `--force` for controlled overwrites.
+- Use `--t2s` to convert Traditional Chinese text to Simplified Chinese after extraction.
+- Keep image OCR extensible instead of bundling a fixed OCR engine.
+
+## Quick Start
+
+### Installation
 
 ```bash
 uv sync
 ```
+
+### Basic usage
+
+```bash
+uv run python main.py input.pdf
+uv run any2md input.docx --output output/
+uv run python main.py docs/ --output output/ --recursive
+```
+
+## Features
+
+- Converter selection is based on file suffixes through a central registry.
+- Batch conversion preserves relative directory layout under the output directory.
+- Dry-run mode performs planning, collision checks, and overwrite checks before writing.
+- Traditional-to-Simplified Chinese conversion is optional and loaded only when needed.
+- Image handling is designed around an OCR extension point instead of a hardcoded backend.
 
 ## Supported formats
 
@@ -31,7 +67,7 @@ uv run any2md input.docx --output output/
 
 ## Output rules
 
-- Single file with no `--output`: writes to `<source-stem>.md` in the current working directory.
+- Single file with no `--output`: writes to `output/<source-stem>.md`.
 - Single file with `--output` pointing to a file path: writes to that file.
 - Single file with `--output` pointing to an existing directory, or a path ending with `/` or `\\`: writes `<stem>.md` inside that directory.
 - Batch mode defaults to the `output/` directory.
@@ -45,6 +81,20 @@ uv run any2md input.docx --output output/
 - `0`: no failures, and at least one item was converted or planned.
 - `1`: no useful conversion or planning result was produced, for example all items were skipped or all items failed.
 - `2`: partial failure, where at least one item converted or planned and at least one item failed.
+
+## Roadmap
+
+- Add clearer OCR backend integration examples and configuration guidance.
+- Expand regression fixtures for more complex real-world documents.
+- Improve packaging and release ergonomics for easier distribution.
+- Explore more format adapters and post-processing hooks where they provide clear value.
+
+## Known limitations
+
+- No OCR engine is bundled in this version.
+- Extraction quality depends on the source document quality and the upstream parsing libraries.
+- Runtime logs and status summaries are written to `stderr`, not `stdout`.
+- Unsupported files are skipped instead of being force-converted.
 
 ## Notes
 

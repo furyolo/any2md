@@ -77,11 +77,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(stdout.getvalue(), "")
             self.assertIn("Converted", stderr.getvalue())
 
-    def test_cli_single_file_default_output_uses_source_stem(self) -> None:
+    def test_cli_single_file_default_output_uses_output_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "note.ok"
-            output = root / "note.md"
+            output = root / "output" / "note.md"
             source.write_text("data", encoding="utf-8")
 
             registry = ConverterRegistry()
