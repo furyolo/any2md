@@ -3,9 +3,13 @@ import tempfile
 import unittest
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import tests._bootstrap
+from any2md.auc.client import AucTask, AucTranscript
+from any2md.auc.task_store import AucTaskStore
 from any2md.cli import main
+from any2md.converters.audio import AudioTaskPendingError
 from any2md.converters.text import text_to_markdown
 from any2md.registry import ConverterRegistry
 
@@ -22,7 +26,141 @@ def unexpected_converter_call(path: Path) -> str:
     raise AssertionError("converter should not be called")
 
 
+class FakeAucStatusClient:
+    def __init__(self, _settings) -> None:
+        self._settings = _settings
+
+    def query(self, task):
+        return type(
+            "FakeStatus",
+            (),
+            {"state": "completed", "transcript": AucTranscript(text="audio-result")},
+        )()
+
+
 class CliTests(unittest.TestCase):
+    @patch("any2md.cli.build_default_registry")
+    def test_cli_no_wait_reports_pending_task(self, mocked_registry_builder) -> None:
+        def pending_converter(path: str) -> str:
+            raise AudioTaskPendingError(
+                task=AucTask(task_id="task-123", logid="log-123"),
+                audio_url=path,
+                reason="Audio task submitted and still processing.",
+            )
+
+        registry = ConverterRegistry()
+        registry.register([".mp3"], pending_converter)
+        mocked_registry_builder.return_value = registry
+
+        stdout = StringIO()
+        stderr = StringIO()
+        code = main(
+            ["https://example.com/audio.mp3", "--no-wait"],
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Processing https://example.com/audio.mp3", stderr.getvalue())
+        self.assertIn("Task ID: task-123", stderr.getvalue())
+        self.assertIn("--auc-status task-123", stderr.getvalue())
+        self.assertIn(
+            "Summary: total=1 converted=0 planned=0 pending=1 skipped=0 failed=0",
+            stderr.getvalue(),
+        )
+
+    @patch("any2md.cli.AucClient", FakeAucStatusClient)
+    @patch("any2md.cli.load_auc_settings", return_value=object())
+    def test_cli_auc_status_outputs_transcript(self, _mocked_settings) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                AucTaskStore().save(
+                    AucTask(task_id="task-456", logid="log-456"),
+                    "https://example.com/audio.mp3",
+                )
+
+                stdout = StringIO()
+                stderr = StringIO()
+                code = main(
+                    ["--auc-status", "task-456"],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout.getvalue().strip(), "audio-result")
+        self.assertIn("Task ID: task-456", stderr.getvalue())
+        self.assertIn("Status: completed", stderr.getvalue())
+
+    def test_cli_accepts_remote_audio_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "audio.md"
+            received: list[str] = []
+
+            def remote_converter(path: str) -> str:
+                received.append(path)
+                return "ok"
+
+            registry = ConverterRegistry()
+            registry.register([".mp3"], remote_converter)
+
+            stdout = StringIO()
+            stderr = StringIO()
+            code = main(
+                ["https://example.com/audio.mp3", "--output", str(output)],
+                registry=registry,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertTrue(output.exists())
+            self.assertEqual(received, ["https://example.com/audio.mp3"])
+            self.assertIn("Converted https://example.com/audio.mp3", stderr.getvalue())
+
+    def test_cli_reports_remote_video_url_as_skipped(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        code = main(
+            ["https://example.com/video.mp4"],
+            registry=ConverterRegistry(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Skipped https://example.com/video.mp4", stderr.getvalue())
+        self.assertIn("Unsupported format: .mp4", stderr.getvalue())
+
+    def test_cli_reports_local_audio_file_as_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "audio.mp3"
+            source.write_bytes(b"fake-audio")
+
+            stdout = StringIO()
+            stderr = StringIO()
+            code = main(
+                [str(source)],
+                registry=ConverterRegistry(),
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("Skipped", stderr.getvalue())
+            self.assertIn("Local audio files are no longer supported", stderr.getvalue())
+
     def test_cli_returns_partial_failure_exit_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -50,7 +188,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("Converted", stderr.getvalue())
             self.assertIn("Failed", stderr.getvalue())
             self.assertIn(
-                "Summary: total=2 converted=1 planned=0 skipped=0 failed=1",
+                "Summary: total=2 converted=1 planned=0 pending=0 skipped=0 failed=1",
                 stderr.getvalue(),
             )
 
@@ -174,7 +312,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(stdout.getvalue(), "")
             self.assertIn("Skipped", stderr.getvalue())
             self.assertIn(
-                "Summary: total=1 converted=0 planned=0 skipped=1 failed=0",
+                "Summary: total=1 converted=0 planned=0 pending=0 skipped=1 failed=0",
                 stderr.getvalue(),
             )
 

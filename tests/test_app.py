@@ -21,6 +21,65 @@ def unexpected_converter_call(path: Path) -> str:
 
 
 class AppTests(unittest.TestCase):
+    def test_remote_audio_url_can_be_passed_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "audio.md"
+            received: list[str] = []
+
+            def remote_converter(path: str) -> str:
+                received.append(path)
+                return "remote-ok"
+
+            registry = ConverterRegistry()
+            registry.register([".mp3"], remote_converter)
+
+            summary = ConversionService(registry=registry).run(
+                inputs=["https://example.com/audio.mp3"],
+                output_path=str(target),
+            )
+
+            self.assertEqual(summary.converted_count, 1)
+            self.assertEqual(summary.failure_count, 0)
+            self.assertTrue(target.exists())
+            self.assertEqual(target.read_text(encoding="utf-8"), "remote-ok")
+            self.assertEqual(received, ["https://example.com/audio.mp3"])
+
+    def test_local_audio_file_is_reported_as_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "audio.mp3"
+            source.write_bytes(b"fake-audio")
+
+            summary = ConversionService(registry=ConverterRegistry()).run(
+                inputs=[str(source)],
+                output_path=str(root / "audio.md"),
+            )
+
+            self.assertEqual(summary.converted_count, 0)
+            self.assertEqual(summary.skipped_count, 1)
+            self.assertEqual(summary.exit_code, 1)
+            self.assertIn(
+                "Local audio files are no longer supported",
+                summary.results[0].message or "",
+            )
+
+    def test_remote_video_url_is_reported_as_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "output"
+
+            summary = ConversionService(registry=ConverterRegistry()).run(
+                inputs=["https://example.com/media/video.mp4?token=abc"],
+                output_path=str(output_dir) + os.sep,
+            )
+
+            self.assertEqual(summary.converted_count, 0)
+            self.assertEqual(summary.skipped_count, 1)
+            self.assertEqual(summary.exit_code, 1)
+            self.assertFalse((output_dir / "video.md").exists())
+            self.assertIn("Unsupported format: .mp4", summary.results[0].message or "")
+
     def test_batch_isolates_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -158,7 +217,7 @@ class AppTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "note.ok"
-            target = root / "note.md"
+            target = root / "output" / "note.md"
             source.write_text("content", encoding="utf-8")
 
             registry = ConverterRegistry()

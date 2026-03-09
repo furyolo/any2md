@@ -28,3 +28,4 @@ htmlcov/
 
 # Local environment
 .env
+.any2md/

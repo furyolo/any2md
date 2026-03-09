@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
+from any2md.converters.audio import AudioConverter
 from any2md.converters.docx import docx_to_markdown
 from any2md.converters.epub import epub_to_markdown
 from any2md.converters.html import html_to_markdown
@@ -12,7 +13,8 @@ from any2md.converters.text import text_to_markdown
 from any2md.errors import UnsupportedFormatError
 from any2md.ocr import OcrEngine, build_default_ocr_engine
 
-Converter = Callable[[Path], str]
+ConverterInput = Path | str
+Converter = Callable[[ConverterInput], str]
 
 
 class ConverterRegistry:
@@ -33,8 +35,11 @@ class ConverterRegistry:
         except KeyError as exc:
             raise UnsupportedFormatError(f"Unsupported format: {normalized}") from exc
 
-    def convert(self, path: Path) -> str:
-        return self.get(path.suffix)(path)
+    def convert(self, path: ConverterInput, *, suffix: str | None = None) -> str:
+        resolved_suffix = suffix
+        if resolved_suffix is None:
+            resolved_suffix = path.suffix if isinstance(path, Path) else Path(path).suffix
+        return self.get(resolved_suffix)(path)
 
     def supports(self, suffix: str) -> bool:
         if not suffix:
@@ -45,7 +50,10 @@ class ConverterRegistry:
         return tuple(sorted(self._converters))
 
 
-def build_default_registry(ocr_engine: OcrEngine | None = None) -> ConverterRegistry:
+def build_default_registry(
+    ocr_engine: OcrEngine | None = None,
+    audio_converter: AudioConverter | None = None,
+) -> ConverterRegistry:
     registry = ConverterRegistry()
     registry.register([".pdf"], pdf_to_markdown)
     registry.register([".epub"], epub_to_markdown)
@@ -53,6 +61,13 @@ def build_default_registry(ocr_engine: OcrEngine | None = None) -> ConverterRegi
     registry.register([".txt"], text_to_markdown)
     registry.register([".docx"], docx_to_markdown)
     registry.register([".jpg", ".jpeg", ".png"], ImageConverter(ocr_engine or build_default_ocr_engine()))
+
+    audio_converter = audio_converter or AudioConverter()
+    registry.register(
+        [".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"],
+        audio_converter,
+    )
+
     return registry
 
 

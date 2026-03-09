@@ -11,8 +11,10 @@ from any2md.converters.epub import epub_to_markdown
 from any2md.converters.html import html_to_markdown
 from any2md.converters.image import ImageConverter
 from any2md.converters.pdf import pdf_to_markdown
+from any2md.converters.audio import AudioConverter
 from any2md.converters.text import text_to_markdown
 from any2md.errors import OcrNotConfiguredError
+from any2md.converters.audio import MediaProcessingError
 
 
 class FakeEpubItem:
@@ -39,6 +41,25 @@ class FakeHtmlResult:
 class FakeOcrEngine:
     def extract_text(self, path: Path) -> str:
         return f"  extracted:{path.name}  "
+
+
+class FakeTranscript:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class FakeAucClient:
+    def __init__(self) -> None:
+        self.audio_url = None
+
+    def transcribe(self, audio_url):
+        self.audio_url = audio_url
+        return FakeTranscript("transcribed")
+
+
+class FakeRenderer:
+    def render(self, transcript) -> str:
+        return transcript.text
 
 
 class ConverterTests(unittest.TestCase):
@@ -140,6 +161,24 @@ class ConverterTests(unittest.TestCase):
 
         converter = ImageConverter(WrappedOcrEngine())
         self.assertEqual(converter(Path("image.png")), "# Title\n- Item")
+
+    def test_audio_converter_rejects_remote_video_url(self) -> None:
+        client = FakeAucClient()
+        converter = AudioConverter(client=client, renderer=FakeRenderer())
+
+        with self.assertRaises(MediaProcessingError) as context:
+            converter("https://example.com/media/demo.mp4?token=1")
+
+        self.assertIn("Unsupported media format: .mp4", str(context.exception))
+
+    def test_audio_converter_rejects_local_audio_file(self) -> None:
+        client = FakeAucClient()
+        converter = AudioConverter(client=client, renderer=FakeRenderer())
+
+        with self.assertRaises(MediaProcessingError) as context:
+            converter(Path("demo.mp3"))
+
+        self.assertIn("Local audio files are no longer supported", str(context.exception))
 
 
 

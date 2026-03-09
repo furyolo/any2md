@@ -18,6 +18,7 @@ to read, archive, and feed into downstream LLM or RAG workflows.
 | `.txt` | Auto-detects UTF-8 / UTF-16 BOM and falls back to GB18030 |
 | `.docx` | `mammoth` converts to HTML, then `markdownify` converts it to Markdown |
 | `.jpg` / `.jpeg` / `.png` | Uses an OpenAI-compatible vision chat model for OCR and outputs Markdown |
+| Direct audio URLs ending in `.mp3` / `.wav` / `.m4a` / `.aac` / `.flac` / `.ogg` | Uses ByteDance AUC API for audio transcription |
 
 ## Current Capabilities
 
@@ -31,6 +32,8 @@ to read, archive, and feed into downstream LLM or RAG workflows.
 - [x] Supports `--force` to overwrite existing output
 - [x] Reports `skipped`, `failed`, `converted`, and `planned` statuses
 - [x] Supports image OCR through an OpenAI-compatible vision model
+- [x] Supports audio transcription through ByteDance AUC API
+- [x] Supports direct audio URL input from the CLI
 - [x] Cleans common OCR wrapper text and normalizes basic Markdown structure
 - [x] Converts stable aligned OCR text blocks into Markdown tables
 
@@ -71,6 +74,9 @@ uv run python main.py input.pdf
 # Convert an image with OCR
 uv run python main.py image.png
 
+# Transcribe audio from a direct URL
+uv run python main.py https://example.com/audio.mp3
+
 # Plan only, do not write files
 uv run python main.py input.pdf --dry-run
 
@@ -87,13 +93,16 @@ uv run python main.py docs/ --output output/ --recursive
 uv run python main.py note.txt --output result.md --force
 ```
 
-## OCR Notes
+## OCR and Audio Notes
 
 - Image OCR uses an OpenAI-compatible Chat Completions endpoint with a
   vision-capable model
 - OCR output is expected to be Markdown rather than plain text whenever the
   model can preserve structure
-- The post-processing step removes common wrapper phrases, normalizes headings
+- Audio transcription uses ByteDance AUC API
+- Direct audio URLs are processed without upload
+- Local audio files are no longer supported
+- The post-processing step removes common wrapper phrases, normalizes headings,
   and list markers, and collapses excessive blank lines
 - When OCR output contains stable aligned columns separated by tabs or repeated
   spaces, those blocks may be converted into Markdown tables
@@ -104,6 +113,8 @@ uv run python main.py note.txt --output result.md --force
 
 - OCR quality still depends heavily on image quality, layout complexity, and
   the capabilities of the upstream vision model
+- Audio transcription depends on AUC availability and the accessibility of the
+  provided audio URL
 - Table reconstruction is heuristic-based, so irregular layouts may still need
   manual cleanup
 - Runtime logs, per-file statuses, and summary output go to `stderr`; `stdout`

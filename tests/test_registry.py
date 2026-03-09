@@ -35,8 +35,17 @@ class RegistryTests(unittest.TestCase):
             ".jpg",
             ".jpeg",
             ".png",
+            ".mp3",
+            ".wav",
+            ".m4a",
+            ".aac",
+            ".flac",
+            ".ogg",
         ]:
             self.assertTrue(registry.supports(suffix))
+
+        for suffix in [".mp4", ".mov", ".mkv", ".avi", ".webm"]:
+            self.assertFalse(registry.supports(suffix))
 
     def test_supports_returns_false_for_suffixless_files(self) -> None:
         registry = build_default_registry()
