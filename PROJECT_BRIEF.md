@@ -14,7 +14,7 @@
 | `.pdf` | `pymupdf4llm` 提取结构化文本与标题 |
 | `.epub` | `ebooklib` 解析章节 HTML，`markdownify` 转 Markdown |
 | `.html` / `.htm` | 读取 HTML 后直接 `markdownify` |
-| `.txt` | 直接读取 UTF-8 文本 |
+| `.txt` | 自动识别 UTF-8 / UTF-16 BOM，必要时回退 GB18030 |
 | `.docx` | `mammoth` 转 HTML 后再交给 `markdownify` |
 | `.jpg` / `.jpeg` / `.png` | 调用兼容 OpenAI Chat Completions 的视觉模型做 OCR，并输出 Markdown |
 

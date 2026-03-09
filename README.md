@@ -74,7 +74,7 @@ uv run python main.py docs/ --output output/ --recursive
 - `.pdf`
 - `.epub`
 - `.html` / `.htm`
-- `.txt`
+- `.txt` (auto-detects UTF-8 / UTF-16 BOM, with GB18030 fallback)
 - `.docx`
 - `.jpg` / `.jpeg` / `.png` (requires LLM OCR settings in `.env`)
 

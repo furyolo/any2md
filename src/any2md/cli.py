@@ -59,7 +59,8 @@ def main(
 
     for result in summary.results:
         if result.succeeded:
-            print(f"Converted {result.input_path} -> {result.output_path}", file=error_stream)
+            detail = f" ({result.message})" if result.message else ""
+            print(f"Converted {result.input_path} -> {result.output_path}{detail}", file=error_stream)
         elif result.planned:
             print(f"Planned {result.input_path} -> {result.output_path}", file=error_stream)
         elif result.skipped:

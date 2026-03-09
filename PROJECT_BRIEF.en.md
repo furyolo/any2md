@@ -15,7 +15,7 @@ to read, archive, and feed into downstream LLM or RAG workflows.
 | `.pdf` | `pymupdf4llm` extracts structured text and headings |
 | `.epub` | `ebooklib` parses chapter HTML, then `markdownify` converts it to Markdown |
 | `.html` / `.htm` | Reads HTML and converts it directly with `markdownify` |
-| `.txt` | Reads UTF-8 text directly |
+| `.txt` | Auto-detects UTF-8 / UTF-16 BOM and falls back to GB18030 |
 | `.docx` | `mammoth` converts to HTML, then `markdownify` converts it to Markdown |
 | `.jpg` / `.jpeg` / `.png` | Uses an OpenAI-compatible vision chat model for OCR and outputs Markdown |
 
@@ -108,4 +108,3 @@ uv run python main.py note.txt --output result.md --force
   manual cleanup
 - Runtime logs, per-file statuses, and summary output go to `stderr`; `stdout`
   is reserved for future content output features
-

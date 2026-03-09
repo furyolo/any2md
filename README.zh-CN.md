@@ -74,7 +74,7 @@ uv run python main.py docs/ --output output/ --recursive
 - `.pdf`
 - `.epub`
 - `.html` / `.htm`
-- `.txt`
+- `.txt`（自动识别 UTF-8 / UTF-16 BOM，必要时回退 GB18030）
 - `.docx`
 - `.jpg` / `.jpeg` / `.png`（需要在 `.env` 中配置 LLM OCR）
 

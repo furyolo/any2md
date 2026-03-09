@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import tempfile
 import types
 import unittest
@@ -76,7 +76,33 @@ class ConverterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "note.txt"
             path.write_text("plain text", encoding="utf-8")
-            self.assertEqual(text_to_markdown(path), "plain text")
+            result = text_to_markdown(path)
+            self.assertEqual(result, "plain text")
+            self.assertEqual(result.source_encoding, "utf-8")
+
+    def test_text_converter_supports_utf16_with_bom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "note.txt"
+            path.write_text("|鈥斺€?鏍囬", encoding="utf-16")
+            result = text_to_markdown(path)
+            self.assertEqual(result, "|鈥斺€?鏍囬")
+            self.assertEqual(result.source_encoding, "utf-16")
+
+    def test_text_converter_falls_back_to_gb18030_without_bom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "note.txt"
+            path.write_bytes("|鈥斺€?鏍囬".encode("gb18030"))
+            result = text_to_markdown(path)
+            self.assertEqual(result, "|鈥斺€?鏍囬")
+            self.assertEqual(result.source_encoding, "gb18030")
+
+    def test_text_converter_reports_attempted_encodings_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "note.txt"
+            path.write_bytes(b"\x81")
+            with self.assertRaises(UnicodeDecodeError) as context:
+                text_to_markdown(path)
+            self.assertIn("attempted encodings: utf-8, gb18030", str(context.exception))
 
     @patch("any2md.converters.docx.markdownify", return_value="# Docx")
     def test_docx_converter_uses_html_bridge(self, mocked_markdownify) -> None:
@@ -110,7 +136,11 @@ class ConverterTests(unittest.TestCase):
     def test_image_converter_cleans_ocr_wrapper_text(self) -> None:
         class WrappedOcrEngine:
             def extract_text(self, path: Path) -> str:
-                return "以下是识别结果：\n\n#标题\n-项目"
+                return "here is the ocr markdown:\n\n#Title\n-Item"
 
         converter = ImageConverter(WrappedOcrEngine())
-        self.assertEqual(converter(Path("image.png")), "# 标题\n- 项目")
+        self.assertEqual(converter(Path("image.png")), "# Title\n- Item")
+
+
+
+

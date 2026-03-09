@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -223,6 +223,10 @@ class ConversionService:
 
             try:
                 markdown = self.registry.convert(job.input_path)
+                conversion_message = None
+                source_encoding = getattr(markdown, "source_encoding", None)
+                if source_encoding:
+                    conversion_message = f"encoding={source_encoding}"
                 markdown = apply_postprocess(markdown, t2s=t2s)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(markdown, encoding="utf-8")
@@ -231,6 +235,7 @@ class ConversionService:
                         input_path=job.input_path,
                         output_path=target,
                         status=ConversionStatus.CONVERTED,
+                        message=conversion_message,
                     )
                 )
             except Exception as exc:
@@ -267,3 +272,5 @@ def convert(input_path: str, output_path: str | None = None, t2s: bool = False) 
 
     message = next((result.message for result in summary.results if result.message), None)
     raise RuntimeError(message or "Conversion failed")
+
+

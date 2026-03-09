@@ -1,4 +1,4 @@
-import os
+﻿import os
 import tempfile
 import unittest
 from io import StringIO
@@ -6,6 +6,7 @@ from pathlib import Path
 
 import tests._bootstrap
 from any2md.cli import main
+from any2md.converters.text import text_to_markdown
 from any2md.registry import ConverterRegistry
 
 
@@ -76,6 +77,54 @@ class CliTests(unittest.TestCase):
             self.assertTrue(output.exists())
             self.assertEqual(stdout.getvalue(), "")
             self.assertIn("Converted", stderr.getvalue())
+
+    def test_cli_reports_detected_text_encoding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "note.txt"
+            output = root / "note.md"
+            source.write_bytes("|鈥斺€?鏍囬".encode("gb18030"))
+
+            registry = ConverterRegistry()
+            registry.register([".txt"], text_to_markdown)
+
+            stdout = StringIO()
+            stderr = StringIO()
+            code = main(
+                [str(source), "--output", str(output)],
+                registry=registry,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(output.exists())
+            self.assertEqual(output.read_text(encoding="utf-8"), "|鈥斺€?鏍囬")
+            self.assertIn("encoding=gb18030", stderr.getvalue())
+
+    def test_cli_reports_attempted_encodings_for_text_decode_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "note.txt"
+            output = root / "note.md"
+            source.write_bytes(b"\x81")
+
+            registry = ConverterRegistry()
+            registry.register([".txt"], text_to_markdown)
+
+            stdout = StringIO()
+            stderr = StringIO()
+            code = main(
+                [str(source), "--output", str(output)],
+                registry=registry,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertFalse(output.exists())
+            self.assertIn("Failed", stderr.getvalue())
+            self.assertIn("attempted encodings: utf-8, gb18030", stderr.getvalue())
 
     def test_cli_single_file_default_output_uses_output_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,3 +234,5 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(with_force, 0)
             self.assertEqual(output.read_text(encoding="utf-8"), "ok")
+
+
