@@ -16,3 +16,7 @@ class InputDiscoveryError(Any2MDError):
 
 class OcrNotConfiguredError(Any2MDError):
     pass
+
+
+class OcrRequestError(Any2MDError):
+    pass

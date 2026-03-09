@@ -26,3 +26,5 @@ htmlcov/
 .ace-tool/
 .test-tmp/
 
+# Local environment
+.env

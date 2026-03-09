@@ -10,7 +10,7 @@ from any2md.converters.image import ImageConverter
 from any2md.converters.pdf import pdf_to_markdown
 from any2md.converters.text import text_to_markdown
 from any2md.errors import UnsupportedFormatError
-from any2md.ocr import OcrEngine
+from any2md.ocr import OcrEngine, build_default_ocr_engine
 
 Converter = Callable[[Path], str]
 
@@ -52,7 +52,7 @@ def build_default_registry(ocr_engine: OcrEngine | None = None) -> ConverterRegi
     registry.register([".html", ".htm"], html_to_markdown)
     registry.register([".txt"], text_to_markdown)
     registry.register([".docx"], docx_to_markdown)
-    registry.register([".jpg", ".jpeg", ".png"], ImageConverter(ocr_engine))
+    registry.register([".jpg", ".jpeg", ".png"], ImageConverter(ocr_engine or build_default_ocr_engine()))
     return registry
 
 

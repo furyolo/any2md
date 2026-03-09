@@ -18,7 +18,7 @@ Convert common document formats into Markdown from the command line.
 - Support single-file conversion, batch directory conversion, and recursive scanning.
 - Use `--dry-run` for planning and `--force` for controlled overwrites.
 - Use `--t2s` to convert Traditional Chinese text to Simplified Chinese after extraction.
-- Keep image OCR extensible instead of bundling a fixed OCR engine.
+- Use OpenAI-compatible vision chat models for image OCR, return Markdown, and clean common OCR wrapper text.
 
 ## Quick Start
 
@@ -28,10 +28,34 @@ Convert common document formats into Markdown from the command line.
 uv sync
 ```
 
+### Configure OCR
+
+Copy the example environment file first:
+
+```bash
+cp .env.example .env
+```
+
+Then set these values in `.env`:
+
+```env
+ANY2MD_LLM_API_BASE=https://api.openai.com/v1
+ANY2MD_LLM_API_KEY=sk-your-api-key
+ANY2MD_LLM_MODEL=gpt-4.1-mini
+```
+
+Notes:
+
+- `ANY2MD_LLM_API_BASE` can be either an OpenAI-compatible base URL or a full `/chat/completions` endpoint.
+- `ANY2MD_LLM_API_KEY` is the API key for that service.
+- `ANY2MD_LLM_MODEL` must be a vision-capable model.
+- The CLI loads `.env` from the current working directory when converting images.
+
 ### Basic usage
 
 ```bash
 uv run python main.py input.pdf
+uv run python main.py image.png
 uv run any2md input.docx --output output/
 uv run python main.py docs/ --output output/ --recursive
 ```
@@ -42,7 +66,8 @@ uv run python main.py docs/ --output output/ --recursive
 - Batch conversion preserves relative directory layout under the output directory.
 - Dry-run mode performs planning, collision checks, and overwrite checks before writing.
 - Traditional-to-Simplified Chinese conversion is optional and loaded only when needed.
-- Image handling is designed around an OCR extension point instead of a hardcoded backend.
+- Image handling uses LLM OCR by default while keeping the OCR interface extensible.
+- OCR cleanup can normalize headings and lists, and convert aligned text blocks into Markdown tables.
 
 ## Supported formats
 
@@ -51,12 +76,13 @@ uv run python main.py docs/ --output output/ --recursive
 - `.html` / `.htm`
 - `.txt`
 - `.docx`
-- `.jpg` / `.jpeg` / `.png` (requires a configured OCR engine)
+- `.jpg` / `.jpeg` / `.png` (requires LLM OCR settings in `.env`)
 
 ## Usage
 
 ```bash
 uv run python main.py input.pdf
+uv run python main.py image.png
 uv run python main.py input.pdf --dry-run
 uv run python main.py input.epub --t2s
 uv run python main.py note.txt --output result.md
@@ -91,7 +117,7 @@ uv run any2md input.docx --output output/
 
 ## Known limitations
 
-- No OCR engine is bundled in this version.
+- This version uses an OpenAI-compatible vision chat model for OCR by default.
 - Extraction quality depends on the source document quality and the upstream parsing libraries.
 - Runtime logs and status summaries are written to `stderr`, not `stdout`.
 - Unsupported files are skipped instead of being force-converted.
@@ -99,7 +125,7 @@ uv run any2md input.docx --output output/
 ## Notes
 
 - `--t2s` lazily loads OpenCC and applies Traditional-to-Simplified Chinese conversion after extraction.
-- Image conversion only defines an OCR extension point in this version. No OCR engine is bundled by default.
+- Image conversion uses an OpenAI-compatible vision chat model by default, strips common wrapper text from OCR output, and converts aligned text blocks into Markdown tables when the structure is stable enough.
 - Unsupported files are reported as skipped whether they are passed directly or discovered during directory scanning.
 - Operational logs, per-file statuses, and summaries are written to stderr. Stdout is reserved for future content output.
 

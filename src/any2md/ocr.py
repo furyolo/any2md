@@ -1,6 +1,257 @@
+from __future__ import annotations
+
+import base64
+import json
+import mimetypes
+import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Mapping, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from any2md.errors import OcrNotConfiguredError, OcrRequestError
 
 
 class OcrEngine(Protocol):
     def extract_text(self, path: Path) -> str: ...
+
+
+DEFAULT_OCR_PROMPT = (
+    "请识别图片中的所有可见文字，并尽量按原始版式整理成 Markdown。"
+    "如果图片中存在标题、列表、表格、代码块或引用，请使用对应的 Markdown 语法表达；"
+    "仅返回 Markdown 正文，不要添加解释、前言、结语或代码围栏；"
+    "不要猜测图片中不存在的内容；无法辨认时保留原样或留空。"
+)
+
+
+@dataclass(slots=True, frozen=True)
+class LlmOcrSettings:
+    api_base: str
+    api_key: str
+    model: str
+    timeout: float = 60.0
+    prompt: str = DEFAULT_OCR_PROMPT
+
+
+def load_env_file(env_path: Path | None = None, *, override: bool = False) -> dict[str, str]:
+    target = env_path or Path.cwd() / ".env"
+    if not target.exists() or not target.is_file():
+        return {}
+
+    loaded: dict[str, str] = {}
+    for raw_line in target.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip().lstrip("\ufeff")
+        if not key:
+            continue
+
+        normalized_value = _normalize_env_value(value.strip())
+        if override or key not in os.environ:
+            os.environ[key] = normalized_value
+            loaded[key] = normalized_value
+
+    return loaded
+
+
+def resolve_llm_ocr_settings(
+    *,
+    env_path: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> LlmOcrSettings:
+    if environ is None:
+        load_env_file(env_path)
+        source: Mapping[str, str] = os.environ
+    else:
+        source = environ
+
+    api_base = _first_value(source, "ANY2MD_LLM_API_BASE", "LLM_API_BASE", "OPENAI_BASE_URL")
+    api_key = _first_value(source, "ANY2MD_LLM_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY")
+    model = _first_value(source, "ANY2MD_LLM_MODEL", "LLM_MODEL", "OPENAI_MODEL")
+    timeout_value = _first_value(source, "ANY2MD_LLM_TIMEOUT", "LLM_TIMEOUT")
+    prompt = _first_value(source, "ANY2MD_OCR_PROMPT", "OCR_PROMPT") or DEFAULT_OCR_PROMPT
+
+    missing = [
+        name
+        for name, value in {
+            "ANY2MD_LLM_API_BASE": api_base,
+            "ANY2MD_LLM_API_KEY": api_key,
+            "ANY2MD_LLM_MODEL": model,
+        }.items()
+        if not value
+    ]
+    if missing:
+        joined = ", ".join(missing)
+        raise OcrNotConfiguredError(
+            "OCR 未配置。请在 .env 中设置以下变量："
+            f"{joined}"
+        )
+
+    timeout = 60.0
+    if timeout_value:
+        try:
+            timeout = float(timeout_value)
+        except ValueError as exc:
+            raise OcrNotConfiguredError(
+                "OCR 超时时间配置无效，请将 ANY2MD_LLM_TIMEOUT 设置为数字。"
+            ) from exc
+
+    return LlmOcrSettings(
+        api_base=api_base,
+        api_key=api_key,
+        model=model,
+        timeout=timeout,
+        prompt=prompt,
+    )
+
+
+class LlmVisionOcrEngine:
+    def __init__(
+        self,
+        settings: LlmOcrSettings | None = None,
+        *,
+        env_path: Path | None = None,
+        http_client: Callable[..., object] = urlopen,
+    ) -> None:
+        self._settings = settings
+        self._env_path = env_path
+        self._http_client = http_client
+
+    def extract_text(self, path: Path) -> str:
+        settings = self._settings or resolve_llm_ocr_settings(env_path=self._env_path)
+        request = self._build_request(path=path, settings=settings)
+
+        try:
+            with self._http_client(request, timeout=settings.timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+            raise OcrRequestError(
+                f"OCR 请求失败，HTTP {exc.code}：{detail or exc.reason}"
+            ) from exc
+        except URLError as exc:
+            raise OcrRequestError(f"OCR 请求失败：{exc.reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise OcrRequestError("OCR 响应不是合法的 JSON。") from exc
+
+        markdown = _extract_message_content(payload)
+        if not markdown:
+            raise OcrRequestError("OCR 响应中没有可用内容。")
+        return _strip_markdown_fence(markdown)
+
+    def _build_request(self, *, path: Path, settings: LlmOcrSettings) -> Request:
+        image_bytes = path.read_bytes()
+        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        encoded_image = base64.b64encode(image_bytes).decode("ascii")
+        endpoint = _resolve_chat_completions_url(settings.api_base)
+        payload = {
+            "model": settings.model,
+            "temperature": 0,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": settings.prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{encoded_image}"
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+        body = json.dumps(payload).encode("utf-8")
+        return Request(
+            endpoint,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+
+def build_default_ocr_engine(env_path: Path | None = None) -> OcrEngine:
+    return LlmVisionOcrEngine(env_path=env_path)
+
+
+def _first_value(source: Mapping[str, str], *keys: str) -> str:
+    for key in keys:
+        value = source.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _normalize_env_value(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    return value
+
+
+def _resolve_chat_completions_url(api_base: str) -> str:
+    normalized = api_base.rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    if normalized.endswith("/v1"):
+        return f"{normalized}/chat/completions"
+    return f"{normalized}/v1/chat/completions"
+
+
+def _extract_message_content(payload: dict[str, object]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        return ""
+
+    message = first_choice.get("message")
+    if not isinstance(message, dict):
+        return ""
+
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+
+    if not isinstance(content, list):
+        return ""
+
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, dict):
+            text = str(item.get("text", "")).strip()
+        else:
+            text = ""
+        if text:
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def _strip_markdown_fence(content: str) -> str:
+    stripped = content.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+    if len(lines) < 3 or lines[-1].strip() != "```":
+        return stripped
+
+    body = lines[1:-1]
+    if body and body[0].strip().lower() in {"markdown", "md"}:
+        body = body[1:]
+    return "\n".join(body).strip()

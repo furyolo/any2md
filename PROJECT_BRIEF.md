@@ -16,7 +16,7 @@
 | `.html` / `.htm` | 读取 HTML 后直接 `markdownify` |
 | `.txt` | 直接读取 UTF-8 文本 |
 | `.docx` | `mammoth` 转 HTML 后再交给 `markdownify` |
-| `.jpg` / `.jpeg` / `.png` | 预留 OCR 扩展点，未配置 OCR 引擎时返回清晰错误 |
+| `.jpg` / `.jpeg` / `.png` | 调用兼容 OpenAI Chat Completions 的视觉模型做 OCR，并输出 Markdown |
 
 ## 当前功能
 
@@ -29,6 +29,9 @@
 - [x] 支持 `--dry-run` 仅规划、不落盘
 - [x] 支持 `--force` 覆盖已有输出
 - [x] 支持 skipped / failed / converted / planned 状态统计
+- [x] 支持通过兼容 OpenAI Chat Completions 的视觉模型进行图片 OCR
+- [x] 支持清理常见 OCR 包裹文本并规范基础 Markdown 结构
+- [x] 支持将规则对齐的 OCR 文本块整理为 Markdown 表格
 
 ## 输出与退出码约定
 
@@ -59,6 +62,9 @@ opencc-python-reimplemented>=0.1.7
 # 单文件转换
 uv run python main.py input.pdf
 
+# 图片 OCR 转 Markdown
+uv run python main.py image.png
+
 # 仅规划，不写文件
 uv run python main.py input.pdf --dry-run
 
@@ -77,5 +83,7 @@ uv run python main.py note.txt --output result.md --force
 
 ## 当前边界
 
-- 图片 OCR 仅提供扩展边界，本版本不内置 OCR 引擎
+- 图片 OCR 默认走兼容 OpenAI Chat Completions 的视觉模型，并对结果做基础 Markdown 清洗；规则对齐的文本块会被整理为 Markdown 表格
+- OCR 质量仍然依赖图片清晰度、版式复杂度以及上游视觉模型能力
+- 表格重建基于启发式规则，遇到不规则布局时仍可能需要手工微调
 - 运行日志、逐文件状态与 summary 写入 stderr；stdout 保留给未来内容输出

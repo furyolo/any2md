@@ -106,3 +106,11 @@ class ConverterTests(unittest.TestCase):
     def test_image_converter_uses_engine(self) -> None:
         converter = ImageConverter(FakeOcrEngine())
         self.assertEqual(converter(Path("image.png")), "extracted:image.png")
+
+    def test_image_converter_cleans_ocr_wrapper_text(self) -> None:
+        class WrappedOcrEngine:
+            def extract_text(self, path: Path) -> str:
+                return "以下是识别结果：\n\n#标题\n-项目"
+
+        converter = ImageConverter(WrappedOcrEngine())
+        self.assertEqual(converter(Path("image.png")), "# 标题\n- 项目")
