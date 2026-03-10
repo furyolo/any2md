@@ -118,8 +118,14 @@ class ConversionService:
     }
     LOCAL_AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 
-    def __init__(self, registry: ConverterRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: ConverterRegistry | None = None,
+        *,
+        allow_local_audio_inputs: bool = False,
+    ) -> None:
         self.registry = registry or build_default_registry()
+        self._allow_local_audio_inputs = allow_local_audio_inputs
 
     def is_batch_mode(self, inputs: Sequence[str]) -> bool:
         return len(inputs) > 1 or any(Path(item).is_dir() for item in inputs)
@@ -213,7 +219,7 @@ class ConversionService:
         input_path: Path,
         source_root: Path | None,
     ) -> None:
-        if input_path.suffix.lower() in self.LOCAL_AUDIO_SUFFIXES:
+        if not self._allow_local_audio_inputs and input_path.suffix.lower() in self.LOCAL_AUDIO_SUFFIXES:
             results.append(
                 ConversionResult(
                     input_path=str(input_path),

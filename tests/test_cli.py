@@ -8,7 +8,7 @@ from unittest.mock import patch
 import tests._bootstrap
 from any2md.auc.client import AucTask, AucTranscript
 from any2md.auc.task_store import AucTaskStore
-from any2md.cli import main
+from any2md.cli import _build_audio_converter, build_parser, main
 from any2md.converters.audio import AudioTaskPendingError
 from any2md.converters.text import text_to_markdown
 from any2md.registry import ConverterRegistry
@@ -39,6 +39,23 @@ class FakeAucStatusClient:
 
 
 class CliTests(unittest.TestCase):
+    def test_qwen_runtime_uses_env_when_cli_flag_is_omitted(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["demo.mp3", "--audio-backend", "qwen-local"])
+
+        with patch.dict(
+            os.environ,
+            {
+                "ANY2MD_QWEN_AUDIO_RUNTIME": "qwen-asr",
+                "ANY2MD_QWEN_AUDIO_MODEL": "Qwen/Qwen3-ASR-1.7B",
+            },
+            clear=False,
+        ):
+            converter, allow_local_audio_inputs = _build_audio_converter(args, StringIO())
+
+        self.assertTrue(allow_local_audio_inputs)
+        self.assertEqual(converter._settings.runtime, "qwen-asr")
+
     @patch("any2md.cli.build_default_registry")
     def test_cli_no_wait_reports_pending_task(self, mocked_registry_builder) -> None:
         def pending_converter(path: str) -> str:
@@ -160,6 +177,36 @@ class CliTests(unittest.TestCase):
             self.assertEqual(stdout.getvalue(), "")
             self.assertIn("Skipped", stderr.getvalue())
             self.assertIn("Local audio files are no longer supported", stderr.getvalue())
+
+    def test_cli_accepts_local_audio_file_with_qwen_local_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "audio.mp3"
+            output = root / "audio.md"
+            source.write_bytes(b"fake-audio")
+            received: list[Path] = []
+
+            def local_converter(path: Path) -> str:
+                received.append(path)
+                return "local-qwen-ok"
+
+            registry = ConverterRegistry()
+            registry.register([".mp3"], local_converter)
+
+            stdout = StringIO()
+            stderr = StringIO()
+            code = main(
+                [str(source), "--audio-backend", "qwen-local", "--output", str(output)],
+                registry=registry,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(received, [source.resolve()])
+            self.assertEqual(output.read_text(encoding="utf-8"), "local-qwen-ok")
+            self.assertIn("Converted", stderr.getvalue())
 
     def test_cli_returns_partial_failure_exit_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

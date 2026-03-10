@@ -1,4 +1,4 @@
-# any2md
+﻿# any2md
 
 [![English](https://img.shields.io/badge/Docs-English-2d7ff9)](README.md)
 [![简体中文](https://img.shields.io/badge/文档-简体中文-e85d75)](README.zh-CN.md)
@@ -20,7 +20,7 @@
 - 支持用 `--dry-run` 先规划，用 `--force` 控制覆盖已有输出。
 - 支持用 `--t2s` 在提取完成后执行繁体转简体。
 - 图片 OCR 使用兼容 OpenAI 的视觉聊天模型，输出 Markdown，并清理常见 OCR 包装文本。
-- 音频转录使用字节跳动 AUC API。
+- 音频转录支持字节跳动 AUC API 与本地 Qwen3-ASR-1.7B 后端。
 
 ## 快速开始
 
@@ -56,12 +56,28 @@ ANY2MD_AUC_ACCESS_KEY=your-access-key
 ANY2MD_AUC_RESOURCE_ID=volc.seedasr.auc
 ```
 
+**本地 Qwen3-ASR-1.7B 音频转录：**
+
+```env
+ANY2MD_QWEN_AUDIO_RUNTIME=qwen-asr
+ANY2MD_QWEN_AUDIO_MODEL=Qwen/Qwen3-ASR-1.7B
+ANY2MD_QWEN_AUDIO_LANGUAGE=auto
+ANY2MD_QWEN_AUDIO_TIMEOUT=3600
+ANY2MD_QWEN_AUDIO_DEVICE_MAP=cpu
+ANY2MD_QWEN_AUDIO_DTYPE=float32
+```
+
 说明：
 
 - `ANY2MD_LLM_API_BASE` 既可以填写兼容 OpenAI 的服务根地址，也支持直接填写完整的 `/chat/completions` 地址。
 - `ANY2MD_LLM_API_KEY` 是对应服务的 API Key。
 - `ANY2MD_LLM_MODEL` 需要是支持图片输入的视觉模型。
 - `ANY2MD_AUC_APP_ID` 和 `ANY2MD_AUC_ACCESS_KEY` 是字节跳动 AUC API 凭证。
+- `ANY2MD_QWEN_AUDIO_EXECUTABLE` 和 `ANY2MD_QWEN_AUDIO_MODEL` 用于配置本地 Qwen3-ASR 运行时。
+- `ANY2MD_QWEN_AUDIO_RUNTIME=qwen-asr` 是当前默认推荐方案，`ANY2MD_QWEN_AUDIO_MODEL` 可直接填写官方模型 ID，首次运行会自动下载。
+- 如果你想强制在 CPU 上运行，可使用 `ANY2MD_QWEN_AUDIO_DEVICE_MAP=cpu` 与 `ANY2MD_QWEN_AUDIO_DTYPE=float32`。
+- `ANY2MD_QWEN_AUDIO_COMMAND_TEMPLATE` 是可选项，仅在你使用 `chatllm.cpp` 或 `llama.cpp` 等实验性运行时时需要。
+- `chatllm.cpp` 与 `llama.cpp` 对 `Qwen3-ASR` 的支持仍受上游版本影响，当前更稳妥的本地方案是官方 `qwen-asr`。
 - 在处理图片或音频时，CLI 会自动从当前工作目录加载 `.env`。
 
 ### 基本用法
@@ -70,17 +86,54 @@ ANY2MD_AUC_RESOURCE_ID=volc.seedasr.auc
 uv run python main.py input.pdf
 uv run python main.py image.png
 uv run python main.py https://example.com/audio.mp3
+uv run python main.py local-audio.mp3 --audio-backend qwen-local
+uv run python main.py "C:/Users/foogl/Music/demo.mp3" --audio-backend qwen-local
 uv run any2md input.docx --output output/
 uv run python main.py docs/ --output output/ --recursive
 ```
 
 ### 音频输入规则
 
-> 当前音频转录**只支持直接远程 URL**。
+> AUC 模式只支持直接远程音频 URL；本地 Qwen 模式同时支持本地文件与直接 URL。
 
 - 支持输入：`http://` 或 `https://` 音频 URL。
-- 不支持输入：`demo.mp3`、`record.wav` 这类本地音频文件路径。
+- AUC 模式下不支持输入：`demo.mp3`、`record.wav` 这类本地音频文件路径。
 - 支持的 URL 后缀：`.mp3`、`.wav`、`.m4a`、`.aac`、`.flac`、`.ogg`。
+
+### 本地 Qwen3-ASR 后端
+
+如果你希望使用本地模型做离线转录，可以这样调用：
+
+```bash
+uv run python main.py demo.mp3 --audio-backend qwen-local
+uv run python main.py demo.wav --audio-backend qwen-local --output output/demo.md
+uv run python main.py demo.flac --audio-backend qwen-local --qwen-runtime qwen-asr
+uv run python main.py "https://example.com/audio.mp3" --audio-backend qwen-local
+```
+
+- `--audio-backend qwen-local` 会启用本地音频转录，并允许直接传入本地音频文件。
+- `--qwen-runtime qwen-asr` 是当前默认推荐方案，兼容官方 `Qwen/Qwen3-ASR-1.7B` 模型 ID 或本地预训练模型目录。
+- `--qwen-runtime chatllm.cpp` 适合搭配 chatllm.cpp 自有模型格式（如 `.bin`），不适合直接加载 `.gguf`。
+- `--qwen-runtime llama.cpp` 只有在上游版本已支持 `qwen3-asr` 架构时才可用；如需自定义命令，再提供 `--qwen-command-template` 或 `ANY2MD_QWEN_AUDIO_COMMAND_TEMPLATE`。
+- 本地后端也兼容直接音频 URL；CLI 会先临时下载音频，再交给本地模型处理。
+- `--no-wait` 与 `--auc-status` 仍然只适用于 AUC 远程后端。
+
+如果你希望明确指定模型来源，可以这样写：
+
+```bash
+uv run python main.py demo.mp3 --audio-backend qwen-local --qwen-model Qwen/Qwen3-ASR-1.7B
+uv run python main.py demo.mp3 --audio-backend qwen-local --qwen-model "D:/Coding/models/Qwen3-ASR-1.7B"
+```
+
+如果你想显式控制设备，也可以这样写：
+
+```bash
+# CPU
+uv run python main.py demo.mp3 --audio-backend qwen-local
+
+# GPU（需 CUDA 版 torch）
+set ANY2MD_QWEN_AUDIO_DEVICE_MAP=cuda && uv run python main.py demo.mp3 --audio-backend qwen-local
+```
 
 ### 长音频交互方式
 
@@ -104,7 +157,7 @@ uv run python main.py --auc-status <task-id> --output output/audio.md
 - 繁体转简体是按需加载的可选后处理能力。
 - 图片处理默认使用 LLM OCR，同时保留可扩展的 OCR 接口。
 - OCR 清洗会规范标题、列表，并将结构稳定的对齐文本块整理为 Markdown 表格。
-- 音频转录使用字节跳动 AUC API。
+- 音频转录支持字节跳动 AUC API 与本地 Qwen3-ASR-1.7B 后端。
 
 ## 支持的格式
 
@@ -114,7 +167,8 @@ uv run python main.py --auc-status <task-id> --output output/audio.md
 - `.txt`（自动识别 UTF-8 / UTF-16 BOM，必要时回退 GB18030）
 - `.docx`
 - `.jpg` / `.jpeg` / `.png`（需要在 `.env` 中配置 OCR）
-- 以 `.mp3`、`.wav`、`.m4a`、`.aac`、`.flac`、`.ogg` 结尾的直接音频 URL（需要在 `.env` 中配置 AUC）
+- 以 `.mp3`、`.wav`、`.m4a`、`.aac`、`.flac`、`.ogg` 结尾的直接音频 URL（AUC 或本地 Qwen 后端）
+- 当选择 `--audio-backend qwen-local` 时，也支持本地 `.mp3`、`.wav`、`.m4a`、`.aac`、`.flac`、`.ogg` 文件
 
 ## 用法示例
 
@@ -150,8 +204,8 @@ uv run any2md input.docx --output output/
 ## 已知限制
 
 - 当前版本默认使用兼容 OpenAI Chat Completions 的视觉模型进行 OCR。
-- 音频转录要求文件可通过 URL 访问；请直接传入音频 URL。
-- 本地音频文件路径会被视为不支持的输入，并被跳过。
+- AUC 模式下，音频文件必须能通过直接 URL 访问。
+- 本地音频文件只在 `--audio-backend qwen-local` 模式下支持。
 - 提取质量依赖源文档质量以及上游解析库能力。
 - 运行日志和状态汇总写入 `stderr`，不会写入 `stdout`。
 - 不支持的文件会被跳过，而不是强制尝试转换。
@@ -160,8 +214,8 @@ uv run any2md input.docx --output output/
 
 - `--t2s` 会按需加载 OpenCC，并在提取完成后执行繁体转简体。
 - 图片转换默认使用兼容 OpenAI 的视觉聊天模型进行 OCR，并会清理常见包装文本；当结构足够稳定时，还会将对齐文本块整理为 Markdown 表格。
-- 音频转换使用字节跳动 AUC API，且仅接受直接传入的音频 URL。
-- 本地音频文件不再支持。
+- 音频转换支持字节跳动 AUC 和本地 Qwen3-ASR 两种方式。
+- 当选择 `--audio-backend qwen-local` 时，支持本地音频文件。
 - 无论是不支持的文件直接传入，还是在目录扫描中发现，都会被标记为跳过。
 - 运行日志、单文件状态和汇总信息会输出到 `stderr`；`stdout` 预留给未来的内容输出能力。
 

@@ -64,6 +64,34 @@ class AppTests(unittest.TestCase):
                 summary.results[0].message or "",
             )
 
+    def test_local_audio_file_can_be_processed_when_backend_allows_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "audio.mp3"
+            target = root / "audio.md"
+            source.write_bytes(b"fake-audio")
+            received: list[Path] = []
+
+            def local_audio_converter(path: Path) -> str:
+                received.append(path)
+                return "local-audio-ok"
+
+            registry = ConverterRegistry()
+            registry.register([".mp3"], local_audio_converter)
+
+            summary = ConversionService(
+                registry=registry,
+                allow_local_audio_inputs=True,
+            ).run(
+                inputs=[str(source)],
+                output_path=str(target),
+            )
+
+            self.assertEqual(summary.converted_count, 1)
+            self.assertEqual(summary.failure_count, 0)
+            self.assertEqual(received, [source.resolve()])
+            self.assertEqual(target.read_text(encoding="utf-8"), "local-audio-ok")
+
     def test_remote_video_url_is_reported_as_unsupported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

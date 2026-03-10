@@ -1,4 +1,4 @@
-# any2md
+﻿# any2md
 
 [![English](https://img.shields.io/badge/Docs-English-2d7ff9)](README.md)
 [![简体中文](https://img.shields.io/badge/文档-简体中文-e85d75)](README.zh-CN.md)
@@ -20,7 +20,7 @@ Convert common document formats into Markdown from the command line.
 - Use `--dry-run` for planning and `--force` for controlled overwrites.
 - Use `--t2s` to convert Traditional Chinese text to Simplified Chinese after extraction.
 - Use OpenAI-compatible vision chat models for image OCR, return Markdown, and clean common OCR wrapper text.
-- Use ByteDance AUC API for audio transcription.
+- Use ByteDance AUC API or local Qwen3-ASR-1.7B runtime for audio transcription.
 
 ## Quick Start
 
@@ -56,12 +56,28 @@ ANY2MD_AUC_ACCESS_KEY=your-access-key
 ANY2MD_AUC_RESOURCE_ID=volc.seedasr.auc
 ```
 
+**For local Qwen3-ASR-1.7B transcription:**
+
+```env
+ANY2MD_QWEN_AUDIO_RUNTIME=qwen-asr
+ANY2MD_QWEN_AUDIO_MODEL=Qwen/Qwen3-ASR-1.7B
+ANY2MD_QWEN_AUDIO_LANGUAGE=auto
+ANY2MD_QWEN_AUDIO_TIMEOUT=3600
+ANY2MD_QWEN_AUDIO_DEVICE_MAP=cpu
+ANY2MD_QWEN_AUDIO_DTYPE=float32
+```
+
 Notes:
 
 - `ANY2MD_LLM_API_BASE` can be either an OpenAI-compatible base URL or a full `/chat/completions` endpoint.
 - `ANY2MD_LLM_API_KEY` is the API key for that service.
 - `ANY2MD_LLM_MODEL` must be a vision-capable model.
 - `ANY2MD_AUC_APP_ID` and `ANY2MD_AUC_ACCESS_KEY` are ByteDance AUC API credentials.
+- `ANY2MD_QWEN_AUDIO_EXECUTABLE` and `ANY2MD_QWEN_AUDIO_MODEL` configure the local Qwen3-ASR runtime.
+- `ANY2MD_QWEN_AUDIO_RUNTIME=qwen-asr` is the recommended default; `ANY2MD_QWEN_AUDIO_MODEL` can be an official model ID and will download on first use.
+- If you want to stay on CPU, set `ANY2MD_QWEN_AUDIO_DEVICE_MAP=cpu` and `ANY2MD_QWEN_AUDIO_DTYPE=float32`.
+- `ANY2MD_QWEN_AUDIO_COMMAND_TEMPLATE` is optional and only needed for experimental runtimes such as `chatllm.cpp` or `llama.cpp`.
+- Support for `Qwen3-ASR` in `chatllm.cpp` / `llama.cpp` depends on upstream versions; the more reliable local path is the official `qwen-asr` runtime.
 - The CLI loads `.env` from the current working directory when converting images or audio files.
 
 ### Basic usage
@@ -70,17 +86,54 @@ Notes:
 uv run python main.py input.pdf
 uv run python main.py image.png
 uv run python main.py https://example.com/audio.mp3
+uv run python main.py local-audio.mp3 --audio-backend qwen-local
+uv run python main.py "C:/Users/foogl/Music/demo.mp3" --audio-backend qwen-local
 uv run any2md input.docx --output output/
 uv run python main.py docs/ --output output/ --recursive
 ```
 
 ### Audio input rules
 
-> Audio transcription currently supports direct remote URLs only.
+> AUC mode supports direct remote audio URLs; local mode supports both local files and direct URLs.
 
 - Supported input: `http://` or `https://` audio URLs.
-- Unsupported input: local audio files such as `demo.mp3` or `record.wav`.
+- Unsupported in AUC mode: local audio files such as `demo.mp3` or `record.wav`.
 - Supported URL suffixes: `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg`.
+
+### Local Qwen3-ASR backend
+
+Use the new independent backend when you want fully local transcription:
+
+```bash
+uv run python main.py demo.mp3 --audio-backend qwen-local
+uv run python main.py demo.wav --audio-backend qwen-local --output output/demo.md
+uv run python main.py demo.flac --audio-backend qwen-local --qwen-runtime qwen-asr
+uv run python main.py "https://example.com/audio.mp3" --audio-backend qwen-local
+```
+
+- `--audio-backend qwen-local` enables local audio transcription and accepts local audio files.
+- `--qwen-runtime qwen-asr` is the recommended default and works with the official `Qwen/Qwen3-ASR-1.7B` model ID or a local pretrained model directory.
+- `--qwen-runtime chatllm.cpp` works with chatllm.cpp-native model formats such as `.bin`, not with `.gguf`.
+- `--qwen-runtime llama.cpp` only works when the upstream version already supports the `qwen3-asr` architecture; only provide `--qwen-command-template` or `ANY2MD_QWEN_AUDIO_COMMAND_TEMPLATE` if you need custom launch arguments.
+- The local backend also accepts direct audio URLs and downloads them to a temporary file before transcription.
+- `--no-wait` and `--auc-status` remain AUC-only options.
+
+If you want to explicitly control the model source, you can also use:
+
+```bash
+uv run python main.py demo.mp3 --audio-backend qwen-local --qwen-model Qwen/Qwen3-ASR-1.7B
+uv run python main.py demo.mp3 --audio-backend qwen-local --qwen-model "D:/Coding/models/Qwen3-ASR-1.7B"
+```
+
+If you want to explicitly control the device:
+
+```bash
+# CPU
+uv run python main.py demo.mp3 --audio-backend qwen-local
+
+# GPU (requires CUDA-enabled torch)
+set ANY2MD_QWEN_AUDIO_DEVICE_MAP=cuda && uv run python main.py demo.mp3 --audio-backend qwen-local
+```
 
 ### Long audio workflow
 
@@ -104,7 +157,7 @@ uv run python main.py --auc-status <task-id> --output output/audio.md
 - Traditional-to-Simplified Chinese conversion is optional and loaded only when needed.
 - Image handling uses LLM OCR by default while keeping the OCR interface extensible.
 - OCR cleanup can normalize headings and lists, and convert aligned text blocks into Markdown tables.
-- Audio transcription uses ByteDance AUC API.
+- Audio transcription supports both ByteDance AUC and a local Qwen3-ASR backend.
 
 ## Supported formats
 
@@ -114,7 +167,8 @@ uv run python main.py --auc-status <task-id> --output output/audio.md
 - `.txt` (auto-detects UTF-8 / UTF-16 BOM, with GB18030 fallback)
 - `.docx`
 - `.jpg` / `.jpeg` / `.png` (requires LLM OCR settings in `.env`)
-- Direct audio URLs ending in `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, or `.ogg` (requires AUC API settings in `.env`)
+- Direct audio URLs ending in `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, or `.ogg` (AUC or local Qwen backend)
+- Local `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg` files when `--audio-backend qwen-local` is selected
 
 ## Usage
 
@@ -134,7 +188,7 @@ uv run any2md input.docx --output output/
 
 - Single file with no `--output`: writes to `output/<source-stem>.md`.
 - Single file with `--output` pointing to a file path: writes to that file.
-- Single file with `--output` pointing to an existing directory, or a path ending with `/` or `\\`: writes `<stem>.md` inside that directory.
+- Single file with `--output` pointing to an existing directory, or a path ending with `/` or `\`: writes `<stem>.md` inside that directory.
 - Batch mode defaults to the `output/` directory.
 - Batch mode treats `--output` as an output directory unless that path already exists as a regular file.
 - Batch mode preserves the relative layout of files discovered from input directories.
@@ -157,8 +211,8 @@ uv run any2md input.docx --output output/
 ## Known limitations
 
 - This version uses an OpenAI-compatible vision chat model for OCR by default.
-- Audio transcription requires files to be accessible via URL. Provide direct audio URLs as CLI input.
-- Local audio file paths are treated as unsupported input and will be skipped.
+- In AUC mode, audio files must be accessible via direct URL.
+- Local audio file paths are supported when `--audio-backend qwen-local` is selected.
 - Extraction quality depends on the source document quality and the upstream parsing libraries.
 - Runtime logs and status summaries are written to `stderr`, not `stdout`.
 - Unsupported files are skipped instead of being force-converted.
@@ -167,8 +221,8 @@ uv run any2md input.docx --output output/
 
 - `--t2s` lazily loads OpenCC and applies Traditional-to-Simplified Chinese conversion after extraction.
 - Image conversion uses an OpenAI-compatible vision chat model by default, strips common wrapper text from OCR output, and converts aligned text blocks into Markdown tables when the structure is stable enough.
-- Audio conversion uses ByteDance AUC API for transcription and only accepts direct audio URLs as input.
-- Local audio files are not supported.
+- Audio conversion supports both ByteDance AUC and the local Qwen3-ASR backend.
+- Local audio files are supported when `--audio-backend qwen-local` is selected.
 - Unsupported files are reported as skipped whether they are passed directly or discovered during directory scanning.
 - Operational logs, per-file statuses, and summaries are written to stderr. Stdout is reserved for future content output.
 

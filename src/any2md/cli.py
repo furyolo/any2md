@@ -11,7 +11,12 @@ from any2md.auc import AucClient, AucMarkdownRenderer
 from any2md.auc.settings import load_auc_settings
 from any2md.auc.task_store import AucTaskStore
 from any2md.app import ConversionService
-from any2md.converters.audio import AudioConverter
+from any2md.converters.audio import (
+    AudioConverter,
+    LocalQwenAudioConverter,
+    QwenAsrAudioConverter,
+    resolve_local_qwen_audio_settings,
+)
 from any2md.errors import Any2MDError
 from any2md.postprocess import apply_postprocess
 from any2md.registry import ConverterRegistry, build_default_registry
@@ -26,9 +31,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--auc-status", help="Check a previously submitted AUC task by task ID.")
     parser.add_argument(
+        "--audio-backend",
+        choices=["auc", "qwen-local"],
+        default="auc",
+        help="Choose the audio transcription backend.",
+    )
+    parser.add_argument(
         "--no-wait",
         action="store_true",
         help="Submit a single remote audio URL and return immediately with a task ID.",
+    )
+    parser.add_argument(
+        "--qwen-runtime",
+        choices=["qwen-asr", "chatllm.cpp", "llama.cpp"],
+        help="Runtime used by the local Qwen3-ASR backend. Defaults to ANY2MD_QWEN_AUDIO_RUNTIME.",
+    )
+    parser.add_argument("--qwen-executable", help="Path to the local chatllm.cpp or llama.cpp executable.")
+    parser.add_argument("--qwen-model", help="Qwen3-ASR model ID, local pretrained model directory, or runtime-specific model path.")
+    parser.add_argument("--qwen-prompt", help="Override the prompt used for local Qwen3-ASR transcription.")
+    parser.add_argument("--qwen-language", help="Set the local Qwen3-ASR language hint.")
+    parser.add_argument("--qwen-timeout", type=int, help="Timeout in seconds for local Qwen3-ASR runs.")
+    parser.add_argument(
+        "--qwen-command-template",
+        help="Custom command template for the local Qwen3-ASR runtime, mainly for llama.cpp.",
     )
     parser.add_argument("-r", "--recursive", action="store_true", help="Recursively scan directories.")
     parser.add_argument("--t2s", action="store_true", help="Convert Traditional Chinese to Simplified Chinese.")
@@ -65,16 +90,15 @@ def main(
         return _handle_auc_status(args, stdout=output_stream, stderr=error_stream)
 
     effective_registry = registry
+    allow_local_audio_inputs = args.audio_backend == "qwen-local"
     if effective_registry is None:
-        effective_registry = build_default_registry(
-            audio_converter=AudioConverter(
-                task_store=AucTaskStore(),
-                wait_for_completion=not args.no_wait,
-                progress_callback=_build_audio_progress_callback(error_stream),
-            )
-        )
+        audio_converter, allow_local_audio_inputs = _build_audio_converter(args, error_stream)
+        effective_registry = build_default_registry(audio_converter=audio_converter)
 
-    service = ConversionService(registry=effective_registry)
+    service = ConversionService(
+        registry=effective_registry,
+        allow_local_audio_inputs=allow_local_audio_inputs,
+    )
 
     try:
         summary = service.run(
@@ -127,18 +151,60 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
     if args.auc_status:
         if args.inputs:
             parser.error("--auc-status cannot be used together with conversion inputs")
-        if args.recursive or args.dry_run or args.force or args.no_wait:
-            parser.error("--auc-status cannot be combined with --recursive, --dry-run, --force, or --no-wait")
+        if (
+            args.recursive
+            or args.dry_run
+            or args.force
+            or args.no_wait
+            or args.audio_backend != "auc"
+            or args.qwen_runtime is not None
+            or args.qwen_executable
+            or args.qwen_model
+            or args.qwen_prompt
+            or args.qwen_language
+            or args.qwen_timeout is not None
+            or args.qwen_command_template
+        ):
+            parser.error(
+                "--auc-status cannot be combined with conversion flags, --no-wait, or local Qwen options"
+            )
         return
 
     if not args.inputs:
         parser.error("at least one input is required")
 
     if args.no_wait:
+        if args.audio_backend != "auc":
+            parser.error("--no-wait is only available with --audio-backend auc")
         if len(args.inputs) != 1:
             parser.error("--no-wait only supports a single direct audio URL")
         if not _is_direct_audio_url(args.inputs[0]):
             parser.error("--no-wait only supports a single direct audio URL")
+
+
+def _build_audio_converter(args, error_stream):
+    if args.audio_backend == "qwen-local":
+        settings = resolve_local_qwen_audio_settings(
+            runtime=args.qwen_runtime,
+            executable=args.qwen_executable,
+            model=args.qwen_model,
+            prompt=args.qwen_prompt,
+            language=args.qwen_language,
+            timeout_seconds=args.qwen_timeout,
+            command_template=args.qwen_command_template,
+        )
+        if settings.runtime == "qwen-asr":
+            return QwenAsrAudioConverter(settings=settings), True
+        return LocalQwenAudioConverter(settings=settings), True
+
+    return (
+        AudioConverter(
+            task_store=AucTaskStore(),
+            wait_for_completion=not args.no_wait,
+            progress_callback=_build_audio_progress_callback(error_stream),
+        ),
+        False,
+    )
 
 
 def _is_direct_audio_url(value: str) -> bool:

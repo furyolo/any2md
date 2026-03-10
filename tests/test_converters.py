@@ -1,9 +1,12 @@
 ﻿import sys
+import os
 import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+import subprocess
 
 import tests._bootstrap
 from any2md.converters.docx import docx_to_markdown
@@ -12,6 +15,10 @@ from any2md.converters.html import html_to_markdown
 from any2md.converters.image import ImageConverter
 from any2md.converters.pdf import pdf_to_markdown
 from any2md.converters.audio import AudioConverter
+from any2md.converters.audio import LocalQwenAudioConverter, LocalQwenAudioSettings
+from any2md.converters.audio import QwenAsrAudioConverter
+from any2md.converters.audio import _configure_qwen_asr_runtime_noise
+from any2md.converters.audio import resolve_local_qwen_audio_settings
 from any2md.converters.text import text_to_markdown
 from any2md.errors import OcrNotConfiguredError
 from any2md.converters.audio import MediaProcessingError
@@ -179,6 +186,137 @@ class ConverterTests(unittest.TestCase):
             converter(Path("demo.mp3"))
 
         self.assertIn("Local audio files are no longer supported", str(context.exception))
+
+    def test_local_qwen_audio_converter_transcribes_local_file(self) -> None:
+        executed: list[list[str]] = []
+
+        def fake_runner(command: list[str], _timeout: int) -> subprocess.CompletedProcess[str]:
+            executed.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="transcribed\n", stderr="")
+
+        settings = LocalQwenAudioSettings(
+            runtime="chatllm.cpp",
+            executable=Path("chatllm.exe"),
+            model=Path("qwen3-asr.gguf"),
+            language="zh",
+        )
+        converter = LocalQwenAudioConverter(settings=settings, command_runner=fake_runner)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "demo.mp3"
+            path.write_bytes(b"fake-audio")
+            result = converter(path)
+
+        self.assertEqual(result, "transcribed")
+        self.assertEqual(executed[0][0], "chatllm.exe")
+        self.assertIn("--multimedia_file_tags", executed[0])
+        self.assertTrue(any("{{audio:" in part for part in executed[0]))
+
+    def test_local_qwen_audio_converter_uses_custom_template_for_llama_cpp(self) -> None:
+        executed: list[list[str]] = []
+
+        def fake_runner(command: list[str], _timeout: int) -> subprocess.CompletedProcess[str]:
+            executed.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="llama-transcribed", stderr="")
+
+        settings = LocalQwenAudioSettings(
+            runtime="llama.cpp",
+            executable=Path("llama-cli.exe"),
+            model=Path("qwen3-asr.gguf"),
+            command_template='"{executable}" -m "{model}" --audio "{audio}" --prompt "{prompt}"',
+        )
+        converter = LocalQwenAudioConverter(settings=settings, command_runner=fake_runner)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "demo.wav"
+            path.write_bytes(b"fake-audio")
+            result = converter(path)
+
+        self.assertEqual(result, "llama-transcribed")
+        self.assertEqual(executed[0][0], "llama-cli.exe")
+        self.assertIn("--audio", executed[0])
+
+    def test_local_qwen_audio_converter_builds_default_llama_cpp_command(self) -> None:
+        executed: list[list[str]] = []
+
+        def fake_runner(command: list[str], _timeout: int) -> subprocess.CompletedProcess[str]:
+            executed.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="llama-default", stderr="")
+
+        settings = LocalQwenAudioSettings(
+            runtime="llama.cpp",
+            executable=Path("llama-cli.exe"),
+            model=Path("qwen3-asr.gguf"),
+            language="zh",
+        )
+        converter = LocalQwenAudioConverter(settings=settings, command_runner=fake_runner)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "demo.wav"
+            path.write_bytes(b"fake-audio")
+            result = converter(path)
+
+        self.assertEqual(result, "llama-default")
+        self.assertEqual(executed[0][0], "llama-cli.exe")
+        self.assertIn("--audio", executed[0])
+        self.assertIn("--simple-io", executed[0])
+        self.assertTrue(any(part.startswith("Language: zh") for part in executed[0]))
+
+    def test_local_qwen_settings_reject_chatllm_cpp_with_gguf_model(self) -> None:
+        with self.assertRaises(MediaProcessingError) as context:
+            resolve_local_qwen_audio_settings(
+                runtime="chatllm.cpp",
+                executable="D:/Coding/models/chatllm_win_x64/bin/main.exe",
+                model="D:/Coding/models/qwen3-asr-1.7b-GGUF/qwen3-asr-1.7b-q8_0.gguf",
+            )
+
+        self.assertIn("does not support GGUF model files", str(context.exception))
+        self.assertIn("Use llama.cpp instead", str(context.exception))
+
+    def test_local_qwen_settings_reject_qwen_asr_with_gguf_model(self) -> None:
+        with self.assertRaises(MediaProcessingError) as context:
+            resolve_local_qwen_audio_settings(
+                runtime="qwen-asr",
+                model="D:/Coding/models/qwen3-asr-1.7b-GGUF/qwen3-asr-1.7b-q8_0.gguf",
+            )
+
+        self.assertIn("does not use GGUF model files", str(context.exception))
+
+    def test_qwen_asr_audio_converter_transcribes_with_official_backend(self) -> None:
+        class FakeResult:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class FakeModel:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str | None]] = []
+
+            def transcribe(self, *, audio: str, language: str | None):
+                self.calls.append((audio, language))
+                return [FakeResult("第一句"), FakeResult("第二句")]
+
+        fake_model = FakeModel()
+        settings = LocalQwenAudioSettings(
+            runtime="qwen-asr",
+            model="Qwen/Qwen3-ASR-1.7B",
+            language="zh",
+        )
+        converter = QwenAsrAudioConverter(settings=settings, model_loader=lambda _settings: fake_model)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "demo.mp3"
+            path.write_bytes(b"fake-audio")
+            result = converter(path)
+
+        self.assertEqual(result, "第一句\n第二句")
+        self.assertEqual(fake_model.calls[0][1], "Chinese")
+
+    @patch("transformers.utils.logging.set_verbosity_error")
+    def test_qwen_asr_runtime_noise_defaults_to_quiet_transformers(self, mocked_set_verbosity_error) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            _configure_qwen_asr_runtime_noise()
+
+        mocked_set_verbosity_error.assert_called_once()
 
 
 
