@@ -19,6 +19,7 @@ from any2md.converters.audio import LocalQwenAudioConverter, LocalQwenAudioSetti
 from any2md.converters.audio import QwenAsrAudioConverter
 from any2md.converters.audio import _configure_qwen_asr_runtime_noise
 from any2md.converters.audio import resolve_local_qwen_audio_settings
+from any2md.io_state import resume_state_path
 from any2md.converters.text import text_to_markdown
 from any2md.errors import OcrNotConfiguredError
 from any2md.converters.audio import MediaProcessingError
@@ -301,7 +302,11 @@ class ConverterTests(unittest.TestCase):
             model="Qwen/Qwen3-ASR-1.7B",
             language="zh",
         )
-        converter = QwenAsrAudioConverter(settings=settings, model_loader=lambda _settings: fake_model)
+        converter = QwenAsrAudioConverter(
+            settings=settings,
+            model_loader=lambda _settings: fake_model,
+            duration_probe=lambda _path: 1,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "demo.mp3"
@@ -310,6 +315,71 @@ class ConverterTests(unittest.TestCase):
 
         self.assertEqual(result, "第一句\n第二句")
         self.assertEqual(fake_model.calls[0][1], "Chinese")
+
+    def test_qwen_asr_audio_converter_can_resume_from_checkpoint(self) -> None:
+        class FakeResult:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class FakeModel:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+                self.second_chunk_attempts = 0
+
+            def transcribe(self, *, audio: str, language: str | None):
+                name = Path(audio).name
+                self.calls.append(name)
+                if name.startswith("chunk_000"):
+                    return [FakeResult("第一段")]
+                if name.startswith("chunk_001"):
+                    self.second_chunk_attempts += 1
+                    if self.second_chunk_attempts <= 3:
+                        raise RuntimeError("第二段失败")
+                    return [FakeResult("第二段")]
+                raise AssertionError(f"unexpected chunk: {name}")
+
+        def fake_splitter(_source: Path, _chunk_duration: int, _total_duration: float, output_dir: Path) -> list[Path]:
+            first = output_dir / "chunk_000.mp3"
+            second = output_dir / "chunk_001.mp3"
+            first.write_bytes(b"chunk-1")
+            second.write_bytes(b"chunk-2")
+            return [first, second]
+
+        fake_model = FakeModel()
+        settings = LocalQwenAudioSettings(
+            runtime="qwen-asr",
+            model="Qwen/Qwen3-ASR-1.7B",
+            language="zh",
+            chunk_duration_seconds=10,
+        )
+        converter = QwenAsrAudioConverter(
+            settings=settings,
+            model_loader=lambda _settings: fake_model,
+            duration_probe=lambda _path: 30,
+            audio_splitter=fake_splitter,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "demo.mp3"
+            output = root / "demo.md"
+            source.write_bytes(b"fake-audio")
+
+            with self.assertRaises(MediaProcessingError) as context:
+                converter(source, output_path=output)
+
+            self.assertIn("已保留续传进度", str(context.exception))
+            self.assertTrue(output.exists())
+            self.assertEqual(output.read_text(encoding="utf-8"), "第一段\n")
+            self.assertTrue(resume_state_path(output).exists())
+
+            resumed = converter(source, output_path=output)
+
+            self.assertEqual(resumed, "第一段\n第二段")
+            self.assertEqual(output.read_text(encoding="utf-8"), "第一段\n第二段")
+            self.assertFalse(resume_state_path(output).exists())
+            self.assertEqual(fake_model.calls.count("chunk_000.mp3"), 1)
+            self.assertGreaterEqual(fake_model.calls.count("chunk_001.mp3"), 4)
 
     @patch("transformers.utils.logging.set_verbosity_error")
     def test_qwen_asr_runtime_noise_defaults_to_quiet_transformers(self, mocked_set_verbosity_error) -> None:

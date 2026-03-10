@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -18,6 +19,7 @@ from any2md.converters.audio import (
     resolve_local_qwen_audio_settings,
 )
 from any2md.errors import Any2MDError
+from any2md.manifest import BatchManifest, manifest_path
 from any2md.postprocess import apply_postprocess
 from any2md.registry import ConverterRegistry, build_default_registry
 
@@ -30,6 +32,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Input files, directories, or direct audio URLs.",
     )
     parser.add_argument("--auc-status", help="Check a previously submitted AUC task by task ID.")
+    parser.add_argument(
+        "--manifest-list",
+        help="Show entries from .any2md-manifest.json under the given batch output directory.",
+    )
+    parser.add_argument(
+        "--manifest-prune",
+        help="Remove manifest entries whose output files no longer exist under the given batch output directory.",
+    )
+    parser.add_argument(
+        "--manifest-status",
+        choices=["converted", "failed", "pending", "skipped"],
+        help="Filter --manifest-list results by manifest status.",
+    )
     parser.add_argument(
         "--audio-backend",
         choices=["auc", "qwen-local"],
@@ -55,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--qwen-command-template",
         help="Custom command template for the local Qwen3-ASR runtime, mainly for llama.cpp.",
     )
+    parser.add_argument(
+        "--qwen-chunk-duration",
+        type=int,
+        help="切片时长（秒），默认 600。超过此时长的音频将自动切分后转录。",
+    )
     parser.add_argument("-r", "--recursive", action="store_true", help="Recursively scan directories.")
     parser.add_argument("--t2s", action="store_true", help="Convert Traditional Chinese to Simplified Chinese.")
     parser.add_argument("-o", "--output", help="Output file path for single-file mode, or directory for batch mode.")
@@ -67,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Overwrite existing output files.",
+    )
+    parser.add_argument(
+        "--resume-failed-only",
+        action="store_true",
+        help="In batch mode, only retry files marked as failed in .any2md-manifest.json.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -89,6 +114,12 @@ def main(
     if args.auc_status:
         return _handle_auc_status(args, stdout=output_stream, stderr=error_stream)
 
+    if args.manifest_prune:
+        return _handle_manifest_prune(args, stdout=output_stream, stderr=error_stream)
+
+    if args.manifest_list:
+        return _handle_manifest_list(args, stdout=output_stream, stderr=error_stream)
+
     effective_registry = registry
     allow_local_audio_inputs = args.audio_backend == "qwen-local"
     if effective_registry is None:
@@ -108,6 +139,7 @@ def main(
             t2s=args.t2s,
             dry_run=args.dry_run,
             force=args.force,
+            resume_failed_only=args.resume_failed_only,
         )
     except Any2MDError as exc:
         print(str(exc), file=error_stream)
@@ -152,7 +184,10 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
         if args.inputs:
             parser.error("--auc-status cannot be used together with conversion inputs")
         if (
-            args.recursive
+            args.manifest_list
+            or args.manifest_prune
+            or args.manifest_status
+            or args.recursive
             or args.dry_run
             or args.force
             or args.no_wait
@@ -164,11 +199,72 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
             or args.qwen_language
             or args.qwen_timeout is not None
             or args.qwen_command_template
+            or args.qwen_chunk_duration is not None
         ):
             parser.error(
                 "--auc-status cannot be combined with conversion flags, --no-wait, or local Qwen options"
             )
         return
+
+    if args.manifest_list:
+        if args.inputs:
+            parser.error("--manifest-list cannot be used together with conversion inputs")
+        if (
+            args.auc_status
+            or args.manifest_prune
+            or args.recursive
+            or args.dry_run
+            or args.force
+            or args.no_wait
+            or args.audio_backend != "auc"
+            or args.qwen_runtime is not None
+            or args.qwen_executable
+            or args.qwen_model
+            or args.qwen_prompt
+            or args.qwen_language
+            or args.qwen_timeout is not None
+            or args.qwen_command_template
+            or args.qwen_chunk_duration is not None
+            or args.output
+            or args.t2s
+            or args.resume_failed_only
+        ):
+            parser.error(
+                "--manifest-list cannot be combined with conversion flags, output flags, or audio backend options"
+            )
+        return
+
+    if args.manifest_prune:
+        if args.inputs:
+            parser.error("--manifest-prune cannot be used together with conversion inputs")
+        if (
+            args.auc_status
+            or args.manifest_list
+            or args.manifest_status
+            or args.recursive
+            or args.dry_run
+            or args.force
+            or args.no_wait
+            or args.audio_backend != "auc"
+            or args.qwen_runtime is not None
+            or args.qwen_executable
+            or args.qwen_model
+            or args.qwen_prompt
+            or args.qwen_language
+            or args.qwen_timeout is not None
+            or args.qwen_command_template
+            or args.qwen_chunk_duration is not None
+            or args.output
+            or args.t2s
+            or args.resume_failed_only
+        ):
+            parser.error(
+                "--manifest-prune cannot be combined with conversion flags, output flags, or audio backend options"
+            )
+        return
+
+    if args.manifest_status:
+        parser.error("--manifest-status requires --manifest-list")
 
     if not args.inputs:
         parser.error("at least one input is required")
@@ -192,9 +288,16 @@ def _build_audio_converter(args, error_stream):
             language=args.qwen_language,
             timeout_seconds=args.qwen_timeout,
             command_template=args.qwen_command_template,
+            chunk_duration_seconds=args.qwen_chunk_duration,
         )
         if settings.runtime == "qwen-asr":
-            return QwenAsrAudioConverter(settings=settings), True
+            return (
+                QwenAsrAudioConverter(
+                    settings=settings,
+                    progress_callback=_build_local_qwen_progress_callback(error_stream),
+                ),
+                True,
+            )
         return LocalQwenAudioConverter(settings=settings), True
 
     return (
@@ -227,6 +330,50 @@ def _build_audio_progress_callback(error_stream):
     return report
 
 
+def _build_local_qwen_progress_callback(error_stream):
+    def report(
+        *,
+        kind: str,
+        index: int = 0,
+        total: int = 0,
+        elapsed_seconds: float | None = None,
+        attempt: int | None = None,
+        max_attempts: int | None = None,
+        error: str | None = None,
+        text_length: int | None = None,
+        duration_minutes: float | None = None,
+    ) -> None:
+        if kind == "chunking_start" and duration_minutes is not None:
+            print(
+                f"检测到长音频 ({duration_minutes:.1f} 分钟)，将切分为 {total} 个片段处理...",
+                file=error_stream,
+            )
+            return
+
+        if kind == "completed" and elapsed_seconds is not None:
+            print(
+                f"[{index}/{total}] 转录切片 {index}... 完成 ({elapsed_seconds:.1f}s)",
+                file=error_stream,
+            )
+            return
+
+        if kind == "chunk_written" and text_length is not None:
+            print(
+                f"[{index}/{total}] 已写入 {text_length} 字到输出文件",
+                file=error_stream,
+            )
+            return
+
+        if kind == "retry" and attempt is not None and max_attempts is not None:
+            detail = " ".join((error or "").split())
+            print(
+                f"[{index}/{total}] 转录切片 {index} 失败，重试 {attempt}/{max_attempts}: {detail}",
+                file=error_stream,
+            )
+
+    return report
+
+
 def _handle_auc_status(args, *, stdout, stderr) -> int:
     task_store = AucTaskStore()
     stored = task_store.load(args.auc_status)
@@ -254,6 +401,82 @@ def _handle_auc_status(args, *, stdout, stderr) -> int:
     print("Status: completed", file=stderr)
     print(markdown, file=stdout)
     return 0
+
+
+def _handle_manifest_list(args, *, stdout, stderr) -> int:
+    manifest, manifest_file = _load_manifest_for_cli(args.manifest_list)
+    entries = sorted(manifest.entries.items(), key=lambda item: item[0])
+    if args.manifest_status:
+        entries = [item for item in entries if item[1].get("status") == args.manifest_status]
+
+    for output_name, payload in entries:
+        status = payload.get("status", "unknown")
+        input_path = payload.get("input_path", "")
+        input_hash = payload.get("input_hash", "")
+        last_run_at = payload.get("last_run_at", "")
+        detail = f"{status} {output_name} | input={input_path} | hash={input_hash} | time={last_run_at}"
+        last_error = payload.get("last_error")
+        task_id = payload.get("task_id")
+        if task_id:
+            detail += f" | task_id={task_id}"
+        if last_error:
+            detail += f" | error={_single_line(last_error)}"
+        print(detail, file=stdout)
+
+    print(
+        (
+            f"Manifest: path={manifest_file} total={len(manifest.entries)} shown={len(entries)}"
+            + (f" filter={args.manifest_status}" if args.manifest_status else "")
+        ),
+        file=stderr,
+    )
+    return 0
+
+
+def _handle_manifest_prune(args, *, stdout, stderr) -> int:
+    manifest, manifest_file = _load_manifest_for_cli(args.manifest_prune)
+    removed = manifest.prune_missing_outputs()
+    manifest.save()
+
+    for key in removed:
+        print(f"Pruned {key}", file=stdout)
+
+    print(
+        f"Manifest pruned: path={manifest_file} removed={len(removed)} remaining={len(manifest.entries)}",
+        file=stderr,
+    )
+    return 0
+
+
+def _load_manifest_for_cli(path_value: str) -> tuple[BatchManifest, Path]:
+    candidate = Path(path_value)
+    if candidate.exists() and candidate.is_file():
+        manifest_file = candidate
+        output_root = candidate.parent
+    elif candidate.name == manifest_path(Path("placeholder")).name:
+        manifest_file = candidate
+        output_root = candidate.parent
+    else:
+        output_root = candidate
+        manifest_file = manifest_path(output_root)
+
+    if not manifest_file.exists():
+        raise Any2MDError(f"Manifest file does not exist: {manifest_file}")
+
+    try:
+        payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Any2MDError(f"Failed to read manifest file: {manifest_file}") from exc
+
+    entries = payload.get("entries")
+    if not isinstance(entries, dict):
+        raise Any2MDError(f"Invalid manifest format: {manifest_file}")
+
+    return BatchManifest(output_root=output_root, entries=entries), manifest_file
+
+
+def _single_line(value: str) -> str:
+    return " ".join(value.split())
 
 
 if __name__ == "__main__":

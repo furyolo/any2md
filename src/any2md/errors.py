@@ -10,6 +10,10 @@ class OutputPathError(Any2MDError):
     pass
 
 
+class OutputLockError(Any2MDError):
+    pass
+
+
 class InputDiscoveryError(Any2MDError):
     pass
 

@@ -15,9 +15,16 @@ Convert common document formats into Markdown from the command line.
 
 ## Highlights
 
-- Convert `.pdf`, `.epub`, `.html`, `.txt`, `.docx`, common image formats, and audio files.
+- Convert `.pdf`, `.epub`, `.html`, `.txt`, `.docx`, common image formats, audio files, and video files.
 - Support single-file conversion, batch directory conversion, and recursive scanning.
 - Use `--dry-run` for planning and `--force` for controlled overwrites.
+- Add file locking on outputs to prevent concurrent writes to the same path.
+- Support checkpoint resume for chunked local Qwen3-ASR transcription by rerunning the same command.
+- Re-running a batch automatically skips files that were already converted, so you can continue unfinished jobs.
+- Batch mode writes `.any2md-manifest.json` in the output directory to track input hashes, statuses, failure reasons, and last run times.
+- You can pair it with `--resume-failed-only` to retry only the entries that previously failed.
+- You can use `--manifest-list` / `--manifest-status` to inspect batch manifests and failed items directly.
+- You can use `--manifest-prune` to remove stale manifest entries whose outputs no longer exist.
 - Use `--t2s` to convert Traditional Chinese text to Simplified Chinese after extraction.
 - Use OpenAI-compatible vision chat models for image OCR, return Markdown, and clean common OCR wrapper text.
 - Use ByteDance AUC API or local Qwen3-ASR-1.7B runtime for audio transcription.
@@ -154,6 +161,10 @@ uv run python main.py --auc-status <task-id> --output output/audio.md
 - Converter selection is based on file suffixes through a central registry.
 - Batch conversion preserves relative directory layout under the output directory.
 - Dry-run mode performs planning, collision checks, and overwrite checks before writing.
+- Output writes are protected by a file lock; if another `any2md` process is already writing the same target, the run fails with a detailed error.
+- Chunked local Qwen3-ASR transcription stores resume metadata next to the output so interrupted runs can continue.
+- In batch mode, existing outputs without a resume state are treated as already completed and skipped automatically.
+- `.any2md-manifest.json` tracks `input_hash`, `status`, `last_error`, and `last_run_at` per output file, so changed inputs are re-converted automatically.
 - Traditional-to-Simplified Chinese conversion is optional and loaded only when needed.
 - Image handling uses LLM OCR by default while keeping the OCR interface extensible.
 - OCR cleanup can normalize headings and lists, and convert aligned text blocks into Markdown tables.
@@ -181,6 +192,10 @@ uv run python main.py input.epub --t2s
 uv run python main.py note.txt --output result.md
 uv run python main.py docs/ --output output/ --recursive
 uv run python main.py note.txt --output result.md --force
+uv run python main.py docs/ --output output/ --resume-failed-only
+uv run python main.py --manifest-list output/
+uv run python main.py --manifest-list output/ --manifest-status failed
+uv run python main.py --manifest-prune output/
 uv run any2md input.docx --output output/
 ```
 
@@ -193,6 +208,13 @@ uv run any2md input.docx --output output/
 - Batch mode treats `--output` as an output directory unless that path already exists as a regular file.
 - Batch mode preserves the relative layout of files discovered from input directories.
 - Existing output files are not overwritten unless `--force` is provided.
+- If a matching resume state file exists, unfinished chunked transcription is resumed instead of being treated as a normal overwrite conflict.
+- In batch mode, existing outputs without a resume state are skipped by default; single-file mode still requires `--force` to overwrite.
+- If the manifest shows that an input has changed, batch mode automatically re-converts it and overwrites the stale output without requiring `--force`.
+- `--resume-failed-only` is intended for batch mode: it skips entries that were previously successful or not recorded as failed, and only retries files whose manifest status is `failed`.
+- `--manifest-list <dir>` reads `.any2md-manifest.json` from that output directory and prints all entries.
+- `--manifest-status <status>` must be used with `--manifest-list` and filters by `converted`, `failed`, `pending`, or `skipped`.
+- `--manifest-prune <dir>` removes entries from `.any2md-manifest.json` when their corresponding output files no longer exist.
 - `--dry-run` performs discovery, skip reporting, output planning, collision checks, and overwrite checks without writing any files.
 
 ## Exit codes
@@ -222,6 +244,7 @@ uv run any2md input.docx --output output/
 - `--t2s` lazily loads OpenCC and applies Traditional-to-Simplified Chinese conversion after extraction.
 - Image conversion uses an OpenAI-compatible vision chat model by default, strips common wrapper text from OCR output, and converts aligned text blocks into Markdown tables when the structure is stable enough.
 - Audio conversion supports both ByteDance AUC and the local Qwen3-ASR backend.
+- Video files are automatically processed by extracting audio tracks first, then transcribed using the selected audio backend.
 - Local audio files are supported when `--audio-backend qwen-local` is selected.
 - Unsupported files are reported as skipped whether they are passed directly or discovered during directory scanning.
 - Operational logs, per-file statuses, and summaries are written to stderr. Stdout is reserved for future content output.

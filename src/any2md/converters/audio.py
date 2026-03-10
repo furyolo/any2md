@@ -5,9 +5,11 @@ import re
 import shlex
 import subprocess
 import tempfile
+import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -19,6 +21,7 @@ from any2md.auc.errors import AucNotConfiguredError
 from any2md.auc.settings import load_auc_settings
 from any2md.auc.task_store import AucTaskStore
 from any2md.errors import Any2MDError
+from any2md.io_state import resume_state_path
 from any2md.ocr import load_env_file
 
 
@@ -51,6 +54,7 @@ class LocalQwenAudioSettings:
     dtype: str = "float32"
     max_new_tokens: int = 256
     max_inference_batch_size: int = 1
+    chunk_duration_seconds: int = 600
 
 
 def resolve_local_qwen_audio_settings(
@@ -66,6 +70,7 @@ def resolve_local_qwen_audio_settings(
     dtype: str | None = None,
     max_new_tokens: int | None = None,
     max_inference_batch_size: int | None = None,
+    chunk_duration_seconds: int | None = None,
     env_path: Path | None = None,
 ) -> LocalQwenAudioSettings:
     load_env_file(env_path)
@@ -89,6 +94,15 @@ def resolve_local_qwen_audio_settings(
     resolved_max_inference_batch_size = max_inference_batch_size
     if resolved_max_inference_batch_size is None:
         resolved_max_inference_batch_size = int(os.getenv("ANY2MD_QWEN_AUDIO_MAX_BATCH_SIZE", "1"))
+
+    resolved_chunk_duration = chunk_duration_seconds
+    if resolved_chunk_duration is None:
+        try:
+            resolved_chunk_duration = int(os.getenv("ANY2MD_QWEN_CHUNK_DURATION", "600"))
+        except ValueError as exc:
+            raise MediaProcessingError("ANY2MD_QWEN_CHUNK_DURATION must be an integer.") from exc
+    if resolved_chunk_duration <= 0:
+        raise MediaProcessingError("ANY2MD_QWEN_CHUNK_DURATION must be greater than 0.")
 
     if resolved_runtime not in {"qwen-asr", "chatllm.cpp", "llama.cpp"}:
         raise MediaProcessingError(
@@ -133,6 +147,7 @@ def resolve_local_qwen_audio_settings(
         dtype=resolved_dtype,
         max_new_tokens=resolved_max_new_tokens,
         max_inference_batch_size=resolved_max_inference_batch_size,
+        chunk_duration_seconds=resolved_chunk_duration,
     )
 
 
@@ -152,7 +167,12 @@ class LocalQwenAudioConverter:
         self._command_runner = command_runner or self._run_command
         self._downloader = downloader or self._download_remote_audio
 
-    def __call__(self, path: Path | str) -> str:
+    def __call__(self, path: Path | str, output_path: Path | None = None) -> str:
+        """转录音频文件。
+
+        注意：此 converter 不支持流式输出，output_path 参数会被忽略。
+        仅为保持接口一致性而接受该参数。
+        """
         settings = self._settings or resolve_local_qwen_audio_settings(env_path=self._env_path)
         with self._resolve_audio_path(path) as audio_path:
             self._ensure_supported_audio(audio_path)
@@ -274,7 +294,9 @@ class LocalQwenAudioConverter:
 
 
 class QwenAsrAudioConverter:
+    CHUNK_RETRY_LIMIT = 3
     AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+    VIDEO_SUFFIXES = {".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm", ".m4v"}
 
     def __init__(
         self,
@@ -282,21 +304,199 @@ class QwenAsrAudioConverter:
         *,
         env_path: Path | None = None,
         model_loader=None,
+        duration_probe=None,
+        audio_splitter=None,
+        progress_callback=None,
     ) -> None:
         self._settings = settings
         self._env_path = env_path
         self._model_loader = model_loader or self._load_model
+        self._duration_probe = duration_probe or _probe_audio_duration
+        self._audio_splitter = audio_splitter or _split_audio_chunks
+        self._progress_callback = progress_callback
         self._model = None
 
-    def __call__(self, path: Path | str) -> str:
+    def __call__(self, path: Path | str, output_path: Path | None = None) -> str:
         settings = self._settings or resolve_local_qwen_audio_settings(env_path=self._env_path)
         audio_input = self._normalize_audio_input(path)
+
+        if isinstance(audio_input, str):
+            return self._transcribe_single(audio_input, settings)
+
+        if audio_input.suffix.lower() in self.VIDEO_SUFFIXES:
+            temp_base = Path.cwd() / "temp"
+            temp_base.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="any2md-video-extract-", dir=temp_base) as tmpdir:
+                audio_path = self._extract_audio_from_video(audio_input, Path(tmpdir))
+                return self._process_audio_file(audio_path, settings, output_path)
+
+        return self._process_audio_file(audio_input, settings, output_path)
+
+    def _process_audio_file(self, audio_path: Path, settings: LocalQwenAudioSettings, output_path: Path | None = None) -> str:
+        duration = self._duration_probe(audio_path)
+
+        if duration <= settings.chunk_duration_seconds:
+            return self._transcribe_single(audio_path, settings)
+
+        temp_base = Path.cwd() / "temp"
+        temp_base.mkdir(parents=True, exist_ok=True)
+
+        with tempfile.TemporaryDirectory(prefix="any2md-qwen-chunks-", dir=temp_base) as tmpdir:
+            chunks = self._audio_splitter(
+                audio_path,
+                settings.chunk_duration_seconds,
+                duration,
+                Path(tmpdir),
+            )
+
+            # 发送切片开始事件
+            if self._progress_callback:
+                self._progress_callback(
+                    kind="chunking_start",
+                    total=len(chunks),
+                    duration_minutes=duration / 60,
+                )
+
+            total_chunks = len(chunks)
+            completed_chunks = self._load_completed_chunks(output_path, total_chunks) if output_path else 0
+            if output_path and completed_chunks >= total_chunks and output_path.exists():
+                self._clear_resume_state(output_path)
+                return output_path.read_text(encoding="utf-8")
+
+            results: list[str] = []
+            append_mode = output_path is not None and completed_chunks > 0 and output_path.exists()
+            file_handle = output_path.open("a" if append_mode else "w", encoding="utf-8") if output_path else None
+            needs_separator = False
+            if output_path and append_mode and output_path.stat().st_size > 0:
+                needs_separator = not output_path.read_text(encoding="utf-8").endswith("\n")
+            try:
+                for idx, chunk in enumerate(chunks[completed_chunks:], completed_chunks + 1):
+                    text = self._transcribe_chunk_with_retry(chunk, idx, total_chunks, settings)
+
+                    if file_handle:
+                        if needs_separator:
+                            file_handle.write("\n")
+                            needs_separator = False
+                        file_handle.write(text)
+                        if idx < total_chunks:
+                            file_handle.write("\n")
+                        file_handle.flush()
+                        self._save_resume_state(output_path, total_chunks, idx)
+
+                        if self._progress_callback:
+                            self._progress_callback(
+                                kind="chunk_written",
+                                index=idx,
+                                total=total_chunks,
+                                text_length=len(text),
+                            )
+
+                    results.append(text)
+            except Exception as exc:
+                if output_path and resume_state_path(output_path).exists():
+                    raise MediaProcessingError(
+                        f"{exc} 已保留续传进度，重新运行相同命令可继续。"
+                    ) from exc
+                raise
+            finally:
+                if file_handle:
+                    file_handle.close()
+
+            if output_path:
+                self._clear_resume_state(output_path)
+                return output_path.read_text(encoding="utf-8")
+
+            return "\n".join(results)
+
+    @staticmethod
+    def _load_completed_chunks(output_path: Path | None, total_chunks: int) -> int:
+        if output_path is None or not output_path.exists():
+            return 0
+
+        state_path = resume_state_path(output_path)
+        if not state_path.exists():
+            return 0
+
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state_path.unlink(missing_ok=True)
+            return 0
+
+        if payload.get("total_chunks") != total_chunks:
+            state_path.unlink(missing_ok=True)
+            return 0
+
+        completed_chunks = payload.get("completed_chunks", 0)
+        if not isinstance(completed_chunks, int) or completed_chunks < 0 or completed_chunks > total_chunks:
+            state_path.unlink(missing_ok=True)
+            return 0
+
+        return completed_chunks
+
+    @staticmethod
+    def _save_resume_state(output_path: Path | None, total_chunks: int, completed_chunks: int) -> None:
+        if output_path is None:
+            return
+
+        state_path = resume_state_path(output_path)
+        payload = {
+            "version": 1,
+            "total_chunks": total_chunks,
+            "completed_chunks": completed_chunks,
+        }
+        state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _clear_resume_state(output_path: Path | None) -> None:
+        if output_path is None:
+            return
+
+        resume_state_path(output_path).unlink(missing_ok=True)
+
+    def _transcribe_chunk_with_retry(
+        self, chunk: Path, idx: int, total: int, settings: LocalQwenAudioSettings
+    ) -> str:
+        for attempt in range(1, self.CHUNK_RETRY_LIMIT + 1):
+            try:
+                start_time = time.time()
+                text = self._transcribe_single(chunk, settings)
+                elapsed = time.time() - start_time
+
+                if self._progress_callback:
+                    self._progress_callback(
+                        kind="completed",
+                        index=idx,
+                        total=total,
+                        elapsed_seconds=elapsed,
+                    )
+
+                return text
+            except Exception as exc:
+                if attempt == self.CHUNK_RETRY_LIMIT:
+                    raise MediaProcessingError(
+                        f"切片 {idx}/{total} 转录失败（已重试 {self.CHUNK_RETRY_LIMIT} 次）: {exc}"
+                    ) from exc
+
+                if self._progress_callback:
+                    self._progress_callback(
+                        kind="retry",
+                        index=idx,
+                        total=total,
+                        attempt=attempt,
+                        max_attempts=self.CHUNK_RETRY_LIMIT,
+                        error=str(exc),
+                    )
+
+    def _transcribe_single(self, audio_input: Path | str, settings: LocalQwenAudioSettings) -> str:
         model = self._model or self._model_loader(settings)
         self._model = model
 
+        audio_str = str(audio_input) if isinstance(audio_input, Path) else audio_input
+
         try:
             results = model.transcribe(
-                audio=audio_input,
+                audio=audio_str,
                 language=_normalize_qwen_asr_language(settings.language),
             )
         except Exception as exc:
@@ -308,7 +508,7 @@ class QwenAsrAudioConverter:
         return transcript
 
     @classmethod
-    def _normalize_audio_input(cls, path: Path | str) -> str:
+    def _normalize_audio_input(cls, path: Path | str) -> Path | str:
         if isinstance(path, str) and AudioConverter._is_remote_url(path):
             cls._ensure_supported_suffix(Path(unquote(urlparse(path).path)).suffix.lower())
             return path
@@ -316,13 +516,52 @@ class QwenAsrAudioConverter:
         local_path = path if isinstance(path, Path) else Path(path)
         if not local_path.exists():
             raise MediaProcessingError(f"Audio file does not exist: {local_path}")
-        cls._ensure_supported_suffix(local_path.suffix.lower())
-        return str(local_path)
+
+        suffix = local_path.suffix.lower()
+        if suffix not in cls.AUDIO_SUFFIXES and suffix not in cls.VIDEO_SUFFIXES:
+            raise MediaProcessingError(
+                f"Unsupported media format: {suffix or '<no suffix>'}. "
+                f"Supported audio: {', '.join(sorted(cls.AUDIO_SUFFIXES))}. "
+                f"Supported video: {', '.join(sorted(cls.VIDEO_SUFFIXES))}"
+            )
+
+        return local_path
 
     @classmethod
     def _ensure_supported_suffix(cls, suffix: str) -> None:
-        if suffix not in cls.AUDIO_SUFFIXES:
-            raise MediaProcessingError(f"Unsupported media format: {suffix or '<no suffix>'}")
+        if suffix not in cls.AUDIO_SUFFIXES and suffix not in cls.VIDEO_SUFFIXES:
+            raise MediaProcessingError(
+                f"Unsupported media format: {suffix or '<no suffix>'}. "
+                f"Supported audio: {', '.join(sorted(cls.AUDIO_SUFFIXES))}. "
+                f"Supported video: {', '.join(sorted(cls.VIDEO_SUFFIXES))}"
+            )
+
+    def _extract_audio_from_video(self, video_path: Path, output_dir: Path) -> Path:
+        """使用 ffmpeg 从视频中提取音频"""
+        audio_path = output_dir / f"{video_path.stem}.mp3"
+
+        cmd = [
+            "ffmpeg",
+            "-i", str(video_path),
+            "-vn",
+            "-acodec", "libmp3lame",
+            "-q:a", "2",
+            "-y",
+            str(audio_path),
+        ]
+
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+            if not audio_path.exists() or audio_path.stat().st_size == 0:
+                raise MediaProcessingError(f"Failed to extract audio from video: output file is empty")
+            return audio_path
+        except subprocess.TimeoutExpired as exc:
+            raise MediaProcessingError(f"Failed to extract audio from video: ffmpeg timeout after 600s") from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+            raise MediaProcessingError(f"Failed to extract audio from video: {stderr.strip()}") from exc
+        except FileNotFoundError as exc:
+            raise MediaProcessingError("ffmpeg not found. Please install ffmpeg.") from exc
 
     @staticmethod
     def _load_model(settings: LocalQwenAudioSettings):
@@ -511,3 +750,64 @@ def _configure_qwen_asr_runtime_noise() -> None:
         return
 
     transformers_logging.set_verbosity_error()
+
+
+def _probe_audio_duration(path: Path) -> float:
+    """使用 ffprobe 探测音频时长（秒）"""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+        return float(result.stdout.strip())
+    except subprocess.TimeoutExpired as exc:
+        raise MediaProcessingError(f"Failed to probe audio duration: ffprobe timeout after 30s") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if exc.stderr else ""
+        raise MediaProcessingError(f"Failed to probe audio duration: {stderr.strip()}") from exc
+    except (ValueError, FileNotFoundError) as exc:
+        raise MediaProcessingError(f"Failed to probe audio duration: {exc}") from exc
+
+
+def _split_audio_chunks(
+    source: Path,
+    chunk_duration: int,
+    total_duration: float,
+    output_dir: Path,
+) -> list[Path]:
+    """使用 ffmpeg 按时间切分音频"""
+    import math
+
+    chunks = []
+    num_chunks = math.ceil(total_duration / chunk_duration)
+
+    for i in range(num_chunks):
+        start = i * chunk_duration
+        chunk_path = output_dir / f"chunk_{i:03d}{source.suffix}"
+
+        cmd = [
+            "ffmpeg",
+            "-i", str(source),
+            "-ss", str(start),
+            "-t", str(chunk_duration),
+            "-c", "copy",
+            "-y",
+            str(chunk_path),
+        ]
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+            if chunk_path.exists() and chunk_path.stat().st_size > 0:
+                chunks.append(chunk_path)
+        except subprocess.TimeoutExpired as exc:
+            raise MediaProcessingError(f"Failed to split audio chunk {i}: ffmpeg timeout after 300s") from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+            raise MediaProcessingError(f"Failed to split audio chunk {i}: {stderr.strip()}") from exc
+        except FileNotFoundError as exc:
+            raise MediaProcessingError("ffmpeg not found. Please install ffmpeg.") from exc
+
+    return chunks

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
-from any2md.converters.audio import AudioConverter
+from any2md.converters.audio import AudioConverter, QwenAsrAudioConverter
 from any2md.converters.docx import docx_to_markdown
 from any2md.converters.epub import epub_to_markdown
 from any2md.converters.html import html_to_markdown
@@ -35,11 +36,18 @@ class ConverterRegistry:
         except KeyError as exc:
             raise UnsupportedFormatError(f"Unsupported format: {normalized}") from exc
 
-    def convert(self, path: ConverterInput, *, suffix: str | None = None) -> str:
+    def convert(self, path: ConverterInput, *, suffix: str | None = None, output_path: Path | None = None) -> str:
         resolved_suffix = suffix
         if resolved_suffix is None:
             resolved_suffix = path.suffix if isinstance(path, Path) else Path(path).suffix
-        return self.get(resolved_suffix)(path)
+        converter = self.get(resolved_suffix)
+
+        # 检查 converter 是否支持 output_path 参数
+        sig = inspect.signature(converter)
+        if "output_path" in sig.parameters:
+            return converter(path, output_path=output_path)
+        else:
+            return converter(path)
 
     def supports(self, suffix: str) -> bool:
         if not suffix:
@@ -67,6 +75,13 @@ def build_default_registry(
         [".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"],
         audio_converter,
     )
+
+    # 如果是 QwenAsrAudioConverter，同时注册视频格式
+    if isinstance(audio_converter, QwenAsrAudioConverter):
+        registry.register(
+            [".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm", ".m4v"],
+            audio_converter,
+        )
 
     return registry
 

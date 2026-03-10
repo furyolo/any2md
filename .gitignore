@@ -29,3 +29,6 @@ htmlcov/
 # Local environment
 .env
 .any2md/
+
+# Temporary audio chunks
+/temp/

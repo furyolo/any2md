@@ -15,9 +15,16 @@
 
 ## 功能亮点
 
-- 支持将 `.pdf`、`.epub`、`.html`、`.txt`、`.docx`、常见图片格式和音频文件转换为 Markdown。
+- 支持将 `.pdf`、`.epub`、`.html`、`.txt`、`.docx`、常见图片格式、音频文件和视频文件转换为 Markdown。
 - 支持单文件转换、目录批量转换和递归扫描。
 - 支持用 `--dry-run` 先规划，用 `--force` 控制覆盖已有输出。
+- 对输出文件增加文件锁，避免多个进程同时写入同一路径。
+- 本地 Qwen3-ASR 长音频分片转录支持断点续传，中断后重新执行相同命令即可继续。
+- 批量任务重复执行时，会自动跳过已完成输出，便于失败后续跑剩余文件。
+- 批量模式会在输出目录写入 `.any2md-manifest.json`，记录输入哈希、状态、失败原因和最近执行时间。
+- 可配合 `--resume-failed-only` 只重试 manifest 中上次失败的条目。
+- 可用 `--manifest-list` / `--manifest-status` 直接查看批量任务清单和失败项。
+- 可用 `--manifest-prune` 清理 manifest 中已失效的输出记录。
 - 支持用 `--t2s` 在提取完成后执行繁体转简体。
 - 图片 OCR 使用兼容 OpenAI 的视觉聊天模型，输出 Markdown，并清理常见 OCR 包装文本。
 - 音频转录支持字节跳动 AUC API 与本地 Qwen3-ASR-1.7B 后端。
@@ -154,6 +161,10 @@ uv run python main.py --auc-status <task-id> --output output/audio.md
 - 通过统一注册表按文件后缀自动选择对应转换器。
 - 批量转换时，会在输出目录下保留输入文件的相对目录结构。
 - `--dry-run` 会先执行规划、冲突检查和覆盖检查，再决定是否写入。
+- 输出阶段会对目标文件加锁；若目标正被其他 `any2md` 进程占用，会直接报错而不是相互覆盖。
+- 本地 Qwen3-ASR 分片转录会在输出旁写入续传状态文件；异常中断后再次执行相同命令会从已完成切片继续。
+- 批量模式下再次执行同一批输入时，已存在且无续传状态的输出会被视为已完成并自动跳过。
+- `.any2md-manifest.json` 会按输出文件维度记录 `input_hash`、`status`、`last_error`、`last_run_at`，输入变化时会自动重新转换。
 - 繁体转简体是按需加载的可选后处理能力。
 - 图片处理默认使用 LLM OCR，同时保留可扩展的 OCR 接口。
 - OCR 清洗会规范标题、列表，并将结构稳定的对齐文本块整理为 Markdown 表格。
@@ -181,6 +192,10 @@ uv run python main.py input.epub --t2s
 uv run python main.py note.txt --output result.md
 uv run python main.py docs/ --output output/ --recursive
 uv run python main.py note.txt --output result.md --force
+uv run python main.py docs/ --output output/ --resume-failed-only
+uv run python main.py --manifest-list output/
+uv run python main.py --manifest-list output/ --manifest-status failed
+uv run python main.py --manifest-prune output/
 uv run any2md input.docx --output output/
 ```
 
@@ -193,6 +208,13 @@ uv run any2md input.docx --output output/
 - 批量模式下，`--output` 会被视为输出目录，除非该路径已存在且是普通文件。
 - 批量模式会保留从输入目录扫描到的文件的相对目录结构。
 - 除非显式传入 `--force`，否则不会覆盖已存在的输出文件。
+- 如果检测到对应的续传状态文件，则允许继续未完成的分片转录，而不会把它误判成普通覆盖冲突。
+- 批量模式下，如果目标文件已存在且无续传状态，则默认跳过该文件；单文件模式仍需使用 `--force` 才会覆盖。
+- 如果 manifest 记录显示输入内容已变化，批量模式会自动重新转换并覆盖旧输出，无需额外传入 `--force`。
+- `--resume-failed-only` 仅在批量模式下有意义：它会跳过上次已成功或未记录失败的条目，只重试 manifest 中状态为 `failed` 的文件。
+- `--manifest-list <目录>` 会读取该输出目录下的 `.any2md-manifest.json` 并列出所有条目。
+- `--manifest-status <状态>` 需要配合 `--manifest-list` 使用，可筛选 `converted`、`failed`、`pending`、`skipped`。
+- `--manifest-prune <目录>` 会删除 `.any2md-manifest.json` 中那些对应输出文件已经不存在的条目。
 - `--dry-run` 会执行文件发现、跳过统计、输出规划、冲突检查和覆盖检查，但不会真正写入文件。
 
 ## 退出码
@@ -215,6 +237,7 @@ uv run any2md input.docx --output output/
 - `--t2s` 会按需加载 OpenCC，并在提取完成后执行繁体转简体。
 - 图片转换默认使用兼容 OpenAI 的视觉聊天模型进行 OCR，并会清理常见包装文本；当结构足够稳定时，还会将对齐文本块整理为 Markdown 表格。
 - 音频转换支持字节跳动 AUC 和本地 Qwen3-ASR 两种方式。
+- 视频文件会自动提取音轨后，使用选定的音频后端进行转录。
 - 当选择 `--audio-backend qwen-local` 时，支持本地音频文件。
 - 无论是不支持的文件直接传入，还是在目录扫描中发现，都会被标记为跳过。
 - 运行日志、单文件状态和汇总信息会输出到 `stderr`；`stdout` 预留给未来的内容输出能力。

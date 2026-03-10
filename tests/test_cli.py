@@ -1,4 +1,5 @@
-﻿import os
+﻿import json
+import os
 import tempfile
 import unittest
 from io import StringIO
@@ -114,6 +115,161 @@ class CliTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue().strip(), "audio-result")
         self.assertIn("Task ID: task-456", stderr.getvalue())
         self.assertIn("Status: completed", stderr.getvalue())
+
+    def test_cli_manifest_list_outputs_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            (output_dir / ".any2md-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "entries": {
+                            "a.md": {
+                                "input_path": "a.ok",
+                                "input_hash": "sha256:aaa",
+                                "status": "converted",
+                                "last_run_at": "2026-03-10T10:00:00Z",
+                                "last_error": None,
+                                "task_id": None,
+                            },
+                            "b.md": {
+                                "input_path": "b.bad",
+                                "input_hash": "sha256:bbb",
+                                "status": "failed",
+                                "last_run_at": "2026-03-10T11:00:00Z",
+                                "last_error": "RuntimeError: boom",
+                                "task_id": None,
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            stderr = StringIO()
+            code = main(
+                ["--manifest-list", str(output_dir)],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("converted a.md", stdout.getvalue())
+            self.assertIn("failed b.md", stdout.getvalue())
+            self.assertIn("Manifest: path=", stderr.getvalue())
+            self.assertIn("shown=2", stderr.getvalue())
+
+    def test_cli_manifest_list_supports_status_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            (output_dir / ".any2md-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "entries": {
+                            "a.md": {
+                                "input_path": "a.ok",
+                                "input_hash": "sha256:aaa",
+                                "status": "converted",
+                                "last_run_at": "2026-03-10T10:00:00Z",
+                                "last_error": None,
+                                "task_id": None,
+                            },
+                            "b.md": {
+                                "input_path": "b.bad",
+                                "input_hash": "sha256:bbb",
+                                "status": "failed",
+                                "last_run_at": "2026-03-10T11:00:00Z",
+                                "last_error": "RuntimeError: boom",
+                                "task_id": None,
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            stderr = StringIO()
+            code = main(
+                ["--manifest-list", str(output_dir), "--manifest-status", "failed"],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertNotIn("converted a.md", stdout.getvalue())
+            self.assertIn("failed b.md", stdout.getvalue())
+            self.assertIn("filter=failed", stderr.getvalue())
+
+    def test_cli_manifest_status_requires_manifest_list(self) -> None:
+        with self.assertRaises(SystemExit):
+            main(["--manifest-status", "failed"], stdout=StringIO(), stderr=StringIO())
+
+    def test_cli_manifest_prune_removes_missing_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            (output_dir / "keep.md").write_text("keep", encoding="utf-8")
+            (output_dir / ".any2md-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "entries": {
+                            "keep.md": {
+                                "input_path": "keep.ok",
+                                "input_hash": "sha256:keep",
+                                "status": "converted",
+                                "last_run_at": "2026-03-10T10:00:00Z",
+                                "last_error": None,
+                                "task_id": None,
+                            },
+                            "missing.md": {
+                                "input_path": "missing.ok",
+                                "input_hash": "sha256:missing",
+                                "status": "failed",
+                                "last_run_at": "2026-03-10T11:00:00Z",
+                                "last_error": "RuntimeError: boom",
+                                "task_id": None,
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            stderr = StringIO()
+            code = main(
+                ["--manifest-prune", str(output_dir)],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("Pruned missing.md", stdout.getvalue())
+            self.assertIn("removed=1", stderr.getvalue())
+
+            payload = json.loads((output_dir / ".any2md-manifest.json").read_text(encoding="utf-8"))
+            self.assertIn("keep.md", payload["entries"])
+            self.assertNotIn("missing.md", payload["entries"])
+
+    def test_cli_manifest_prune_cannot_be_combined_with_manifest_list(self) -> None:
+        with self.assertRaises(SystemExit):
+            main(
+                ["--manifest-prune", "output", "--manifest-list", "output"],
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
 
     def test_cli_accepts_remote_audio_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -419,5 +575,85 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(with_force, 0)
             self.assertEqual(output.read_text(encoding="utf-8"), "ok")
+
+    def test_cli_batch_rerun_skips_already_converted_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_dir = root / "inputs"
+            output_dir = root / "output"
+            source_dir.mkdir()
+            (source_dir / "a.ok").write_text("a", encoding="utf-8")
+            (source_dir / "b.ok").write_text("b", encoding="utf-8")
+
+            registry = ConverterRegistry()
+            registry.register([".ok"], ok_converter)
+
+            first_stdout = StringIO()
+            first_stderr = StringIO()
+            first_code = main(
+                [str(source_dir), "--output", str(output_dir)],
+                registry=registry,
+                stdout=first_stdout,
+                stderr=first_stderr,
+            )
+
+            second_stdout = StringIO()
+            second_stderr = StringIO()
+            second_code = main(
+                [str(source_dir), "--output", str(output_dir)],
+                registry=registry,
+                stdout=second_stdout,
+                stderr=second_stderr,
+            )
+
+            self.assertEqual(first_code, 0)
+            self.assertEqual(second_code, 0)
+            self.assertIn("Skipped", second_stderr.getvalue())
+            self.assertIn("Already converted", second_stderr.getvalue())
+            self.assertIn(
+                "Summary: total=2 converted=0 planned=0 pending=0 skipped=2 failed=0",
+                second_stderr.getvalue(),
+            )
+
+    def test_cli_resume_failed_only_retries_failed_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_dir = root / "inputs"
+            output_dir = root / "output"
+            source_dir.mkdir()
+            good = source_dir / "good.ok"
+            bad = source_dir / "bad.bad"
+            good.write_text("good", encoding="utf-8")
+            bad.write_text("bad", encoding="utf-8")
+
+            first_registry = ConverterRegistry()
+            first_registry.register([".ok"], ok_converter)
+            first_registry.register([".bad"], bad_converter)
+
+            first_code = main(
+                [str(source_dir), "--output", str(output_dir)],
+                registry=first_registry,
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+
+            second_registry = ConverterRegistry()
+            second_registry.register([".ok"], unexpected_converter_call)
+            second_registry.register([".bad"], lambda _path: "fixed")
+
+            second_stdout = StringIO()
+            second_stderr = StringIO()
+            second_code = main(
+                [str(source_dir), "--output", str(output_dir), "--resume-failed-only"],
+                registry=second_registry,
+                stdout=second_stdout,
+                stderr=second_stderr,
+            )
+
+            self.assertEqual(first_code, 2)
+            self.assertEqual(second_code, 0)
+            self.assertIn("Skipped", second_stderr.getvalue())
+            self.assertIn("Skipped by --resume-failed-only", second_stderr.getvalue())
+            self.assertIn("Converted", second_stderr.getvalue())
 
 
