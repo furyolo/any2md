@@ -1,24 +1,27 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import shlex
 import subprocess
 import tempfile
+import threading
 import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 from pathlib import Path
+from typing import Literal
 from urllib.parse import unquote, urlparse
 
 import httpx
 
 from any2md.auc import AucClient, AucMarkdownRenderer
-from any2md.auc.client import AucTask
+from any2md.auc.client import AucAsyncClient, AucTask
 from any2md.auc.errors import AucNotConfiguredError
-from any2md.auc.settings import load_auc_settings
+from any2md.auc.settings import AucSettings, load_auc_settings
 from any2md.auc.task_store import AucTaskStore
 from any2md.errors import Any2MDError
 from any2md.io_state import resume_state_path
@@ -298,6 +301,10 @@ class QwenAsrAudioConverter:
     AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
     VIDEO_SUFFIXES = {".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm", ".m4v"}
 
+    # 类级别的模型缓存和锁，确保多个实例共享同一个模型
+    _shared_model = None
+    _model_lock = threading.Lock()
+
     def __init__(
         self,
         settings: LocalQwenAudioSettings | None = None,
@@ -489,8 +496,11 @@ class QwenAsrAudioConverter:
                     )
 
     def _transcribe_single(self, audio_input: Path | str, settings: LocalQwenAudioSettings) -> str:
-        model = self._model or self._model_loader(settings)
-        self._model = model
+        # 使用类级别的共享模型和锁，确保并发安全
+        with QwenAsrAudioConverter._model_lock:
+            if QwenAsrAudioConverter._shared_model is None:
+                QwenAsrAudioConverter._shared_model = self._model_loader(settings)
+            model = QwenAsrAudioConverter._shared_model
 
         audio_str = str(audio_input) if isinstance(audio_input, Path) else audio_input
 
@@ -573,6 +583,19 @@ class QwenAsrAudioConverter:
                 "qwen-asr is not installed. Install it with: uv pip install -U qwen-asr"
             ) from exc
 
+        # 检查配置并给出警告
+        if settings.device_map == "cpu" and settings.dtype == "float32":
+            import sys
+            print(
+                "\n⚠️  警告：当前配置 (CPU + float32) 可能导致模型加载缓慢或卡死。\n"
+                "   建议修改 .env 配置：\n"
+                "   - 使用 GPU: ANY2MD_QWEN_AUDIO_DEVICE_MAP=cuda\n"
+                "   - 降低精度: ANY2MD_QWEN_AUDIO_DTYPE=float16\n"
+                "   - 或使用远程服务: --audio-backend auc\n",
+                file=sys.stderr,
+                flush=True
+            )
+
         try:
             return Qwen3ASRModel.from_pretrained(
                 settings.model,
@@ -582,7 +605,14 @@ class QwenAsrAudioConverter:
                 max_inference_batch_size=settings.max_inference_batch_size,
             )
         except Exception as exc:
-            raise MediaProcessingError(f"Failed to initialize qwen-asr model: {exc}") from exc
+            error_msg = str(exc)
+            if settings.device_map == "cpu":
+                error_msg += (
+                    "\n\n提示：CPU 模式下模型加载可能失败。建议：\n"
+                    "1. 修改 .env: ANY2MD_QWEN_AUDIO_DEVICE_MAP=cuda (需要 GPU)\n"
+                    "2. 或使用远程服务: --audio-backend auc"
+                )
+            raise MediaProcessingError(f"Failed to initialize qwen-asr model: {error_msg}") from exc
 
 
 class AudioConverter:
@@ -677,6 +707,332 @@ class AudioConverter:
         parsed = urlparse(url)
         filename = Path(unquote(parsed.path)).name or parsed.netloc or "remote-media"
         return Path(filename)
+
+
+class AudioAsyncConverter:
+    """异步音频转换器，支持 AUC 和本地 Qwen3-ASR"""
+
+    def __init__(
+        self,
+        *,
+        auc_settings: AucSettings | None = None,
+        local_qwen_settings: LocalQwenAudioSettings | None = None,
+        task_store: AucTaskStore | None = None,
+    ) -> None:
+        self._auc_settings = auc_settings
+        self._local_qwen_settings = local_qwen_settings
+        self._task_store = task_store
+
+    async def convert(
+        self,
+        source: str | Path,
+        *,
+        method: Literal["auc", "local"] | None = None,
+        streaming: bool = False,
+    ) -> str:
+        """异步转换音频为 Markdown"""
+        if method is None:
+            method = "auc" if self._auc_settings else "local"
+
+        if method == "auc":
+            if not self._auc_settings:
+                raise AucNotConfiguredError()
+            return await self._convert_with_auc_async(source, streaming=streaming)
+        elif method == "local":
+            if not self._local_qwen_settings:
+                raise MediaProcessingError("Local Qwen3-ASR not configured")
+            return await self._convert_with_local_qwen_async(source, streaming=streaming)
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+    async def _convert_with_auc_async(
+        self,
+        source: str | Path,
+        *,
+        streaming: bool = False,
+    ) -> str:
+        """使用 AUC 异步转换音频"""
+        if not self._auc_settings:
+            raise AucNotConfiguredError()
+
+        client = AucAsyncClient(self._auc_settings)
+        renderer = AucMarkdownRenderer()
+
+        if isinstance(source, Path):
+            audio_url = source.as_uri()
+        else:
+            audio_url = source
+
+        if streaming and self._task_store:
+            task = await client.submit(audio_url)
+            self._task_store.save(task, audio_url)
+            raise AudioTaskPendingError(
+                task=task,
+                audio_url=audio_url,
+                reason=f"AUC task {task.task_id} submitted, transcription in progress",
+            )
+
+        transcript = await client.transcribe(audio_url)
+        return renderer.render(transcript)
+
+    async def _convert_with_local_qwen_async(
+        self,
+        source: str | Path,
+        *,
+        streaming: bool = False,
+    ) -> str:
+        """使用本地 Qwen3-ASR 异步转换音频"""
+        if not self._local_qwen_settings:
+            raise MediaProcessingError("Local Qwen3-ASR not configured")
+
+        settings = self._local_qwen_settings
+        source_path = Path(source) if isinstance(source, str) else source
+
+        if not source_path.exists():
+            raise MediaProcessingError(f"Audio file not found: {source_path}")
+
+        if settings.runtime == "qwen-asr":
+            return await self._run_qwen_asr_cli_async(source_path, settings, streaming=streaming)
+        elif settings.runtime == "python":
+            return await self._run_qwen_asr_python_async(source_path, settings, streaming=streaming)
+        else:
+            raise MediaProcessingError(f"Unknown runtime: {settings.runtime}")
+
+    async def _run_qwen_asr_cli_async(
+        self,
+        source: Path,
+        settings: LocalQwenAudioSettings,
+        *,
+        streaming: bool = False,
+    ) -> str:
+        """使用 qwen-asr CLI 异步转录"""
+        executable = settings.executable or "qwen-asr"
+
+        cmd = [
+            str(executable),
+            str(source),
+            "--model", settings.model,
+            "--prompt", settings.prompt,
+            "--language", settings.language,
+            "--device-map", settings.device_map,
+            "--dtype", settings.dtype,
+            "--max-new-tokens", str(settings.max_new_tokens),
+            "--max-inference-batch-size", str(settings.max_inference_batch_size),
+            "--chunk-duration", str(settings.chunk_duration_seconds),
+        ]
+
+        if streaming:
+            cmd.append("--streaming")
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=settings.timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                # Terminate process on timeout
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+                raise MediaProcessingError(
+                    f"qwen-asr timeout after {settings.timeout_seconds}s"
+                )
+
+            if process.returncode != 0:
+                error_msg = stderr.decode("utf-8", errors="replace").strip()
+                raise MediaProcessingError(f"qwen-asr failed: {error_msg}")
+
+            return stdout.decode("utf-8", errors="replace").strip()
+
+        except FileNotFoundError as exc:
+            raise MediaProcessingError(
+                f"qwen-asr executable not found: {executable}"
+            ) from exc
+
+    async def _run_qwen_asr_python_async(
+        self,
+        source: Path,
+        settings: LocalQwenAudioSettings,
+        *,
+        streaming: bool = False,
+    ) -> str:
+        """使用 Python API 异步转录（在线程池中运行）"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self._run_qwen_asr_python_sync,
+            source,
+            settings,
+            streaming,
+        )
+
+    def _run_qwen_asr_python_sync(
+        self,
+        source: Path,
+        settings: LocalQwenAudioSettings,
+        streaming: bool,
+    ) -> str:
+        """同步 Python API 转录（在线程池中执行）"""
+        _configure_qwen_asr_runtime_noise()
+
+        try:
+            from qwen_asr import QwenASR
+        except ImportError as exc:
+            raise MediaProcessingError(
+                "qwen-asr package not installed. Install with: pip install qwen-asr"
+            ) from exc
+
+        model = QwenASR(
+            model_id=settings.model,
+            device_map=settings.device_map,
+            dtype=settings.dtype,
+        )
+
+        language = _normalize_qwen_asr_language(settings.language)
+
+        if streaming:
+            total_duration = _probe_audio_duration(source)
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                chunks = _split_audio_chunks(
+                    source,
+                    settings.chunk_duration_seconds,
+                    total_duration,
+                    Path(tmpdir),
+                )
+
+                parts: list[str] = []
+                for chunk in chunks:
+                    results = model.transcribe(
+                        str(chunk),
+                        prompt=settings.prompt,
+                        language=language,
+                        max_new_tokens=settings.max_new_tokens,
+                        max_inference_batch_size=settings.max_inference_batch_size,
+                    )
+                    text = _extract_qwen_asr_text(results)
+                    if text:
+                        parts.append(text)
+
+                return "\n\n".join(parts).strip()
+        else:
+            results = model.transcribe(
+                str(source),
+                prompt=settings.prompt,
+                language=language,
+                max_new_tokens=settings.max_new_tokens,
+                max_inference_batch_size=settings.max_inference_batch_size,
+            )
+            return _extract_qwen_asr_text(results)
+
+
+async def _probe_audio_duration_async(path: Path) -> float:
+    """使用 ffprobe 异步探测音频时长（秒）"""
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            # Terminate process on timeout
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+            raise MediaProcessingError("Failed to probe audio duration: ffprobe timeout after 30s")
+
+        if process.returncode != 0:
+            error_msg = stderr.decode("utf-8", errors="replace").strip()
+            raise MediaProcessingError(f"Failed to probe audio duration: {error_msg}")
+
+        return float(stdout.decode("utf-8").strip())
+    except (ValueError, FileNotFoundError) as exc:
+        raise MediaProcessingError(f"Failed to probe audio duration: {exc}") from exc
+
+
+async def _split_audio_chunks_async(
+    source: Path,
+    chunk_duration: int,
+    total_duration: float,
+    output_dir: Path,
+) -> list[Path]:
+    """使用 ffmpeg 异步按时间切分音频"""
+    import math
+
+    chunks = []
+    num_chunks = math.ceil(total_duration / chunk_duration)
+
+    for i in range(num_chunks):
+        start = i * chunk_duration
+        chunk_path = output_dir / f"chunk_{i:03d}{source.suffix}"
+
+        cmd = [
+            "ffmpeg",
+            "-i", str(source),
+            "-ss", str(start),
+            "-t", str(chunk_duration),
+            "-c", "copy",
+            "-y",
+            str(chunk_path),
+        ]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=300,
+                )
+            except asyncio.TimeoutError:
+                # Terminate process on timeout
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+                raise MediaProcessingError(f"Failed to split audio chunk {i}: ffmpeg timeout after 300s")
+
+            if process.returncode != 0:
+                error_msg = stderr.decode("utf-8", errors="replace").strip()
+                raise MediaProcessingError(f"Failed to split audio chunk {i}: {error_msg}")
+
+            if chunk_path.exists() and chunk_path.stat().st_size > 0:
+                chunks.append(chunk_path)
+        except FileNotFoundError as exc:
+            raise MediaProcessingError("ffmpeg not found. Please install ffmpeg.") from exc
+
+    return chunks
 
 
 def _strip_ansi(text: str) -> str:

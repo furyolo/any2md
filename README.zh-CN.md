@@ -27,7 +27,7 @@
 - 可用 `--manifest-prune` 清理 manifest 中已失效的输出记录。
 - 支持用 `--t2s` 在提取完成后执行繁体转简体。
 - 图片 OCR 使用兼容 OpenAI 的视觉聊天模型，输出 Markdown，并清理常见 OCR 包装文本。
-- 音频转录支持字节跳动 AUC API 与本地 Qwen3-ASR-1.7B 后端。
+- 音频转录默认使用本地 Qwen3-ASR-1.7B，可通过 `--audio-backend auc` 选择字节跳动 AUC 支持。
 
 ## 快速开始
 
@@ -93,65 +93,98 @@ ANY2MD_QWEN_AUDIO_DTYPE=float32
 uv run python main.py input.pdf
 uv run python main.py image.png
 uv run python main.py https://example.com/audio.mp3
-uv run python main.py local-audio.mp3 --audio-backend qwen-local
-uv run python main.py "C:/Users/foogl/Music/demo.mp3" --audio-backend qwen-local
+uv run python main.py local-audio.mp3
+uv run python main.py "C:/Users/foogl/Music/demo.mp3"
 uv run any2md input.docx --output output/
 uv run python main.py docs/ --output output/ --recursive
 ```
 
-### 音频输入规则
+### 异步与并发控制
 
-> AUC 模式只支持直接远程音频 URL；本地 Qwen 模式同时支持本地文件与直接 URL。
-
-- 支持输入：`http://` 或 `https://` 音频 URL。
-- AUC 模式下不支持输入：`demo.mp3`、`record.wav` 这类本地音频文件路径。
-- 支持的 URL 后缀：`.mp3`、`.wav`、`.m4a`、`.aac`、`.flac`、`.ogg`。
-
-### 本地 Qwen3-ASR 后端
-
-如果你希望使用本地模型做离线转录，可以这样调用：
+默认情况下，any2md 在转换多个文件时使用异步处理以获得更好的性能：
 
 ```bash
-uv run python main.py demo.mp3 --audio-backend qwen-local
-uv run python main.py demo.wav --audio-backend qwen-local --output output/demo.md
-uv run python main.py demo.flac --audio-backend qwen-local --qwen-runtime qwen-asr
-uv run python main.py "https://example.com/audio.mp3" --audio-backend qwen-local
+# 默认：异步模式，5个并发转换
+uv run python main.py docs/ --output output/ --recursive
+
+# 控制并发数量
+uv run python main.py docs/ --output output/ --recursive --max-concurrent 10
+
+# 强制使用同步模式（逐个处理文件）
+uv run python main.py docs/ --output output/ --recursive --sync
 ```
 
-- `--audio-backend qwen-local` 会启用本地音频转录，并允许直接传入本地音频文件。
+- `--max-concurrent N`：设置最大并发文件转换数（默认：5）
+- `--sync`：强制使用同步模式而非异步处理
+
+异步模式显著提升批量转换性能，特别是在处理涉及网络请求的文件（OCR、音频转录）时。
+
+### 音频输入规则
+
+> 默认情况下，any2md 使用本地 Qwen3-ASR 进行离线转录，同时支持本地文件和直接 URL。AUC 模式需要显式指定 `--audio-backend auc`，且仅支持远程 URL。
+
+- **默认（Qwen3-ASR）**：支持本地音频文件（如 `demo.mp3`、`record.wav`）和直接 `http://` 或 `https://` 音频 URL。
+- **AUC 模式**：需要 `--audio-backend auc`，仅支持直接远程音频 URL。
+- 支持的音频后缀：`.mp3`、`.wav`、`.m4a`、`.aac`、`.flac`、`.ogg`。
+
+### 默认：本地 Qwen3-ASR 后端
+
+本地 Qwen3-ASR 是默认的音频转录后端，无需额外参数：
+
+```bash
+uv run python main.py demo.mp3
+uv run python main.py demo.wav --output output/demo.md
+uv run python main.py demo.flac --qwen-runtime qwen-asr
+uv run python main.py "https://example.com/audio.mp3"
+```
+
+- 默认启用本地音频转录，同时支持本地音频文件和直接 URL。
 - `--qwen-runtime qwen-asr` 是当前默认推荐方案，兼容官方 `Qwen/Qwen3-ASR-1.7B` 模型 ID 或本地预训练模型目录。
 - `--qwen-runtime chatllm.cpp` 适合搭配 chatllm.cpp 自有模型格式（如 `.bin`），不适合直接加载 `.gguf`。
 - `--qwen-runtime llama.cpp` 只有在上游版本已支持 `qwen3-asr` 架构时才可用；如需自定义命令，再提供 `--qwen-command-template` 或 `ANY2MD_QWEN_AUDIO_COMMAND_TEMPLATE`。
 - 本地后端也兼容直接音频 URL；CLI 会先临时下载音频，再交给本地模型处理。
-- `--no-wait` 与 `--auc-status` 仍然只适用于 AUC 远程后端。
 
 如果你希望明确指定模型来源，可以这样写：
 
 ```bash
-uv run python main.py demo.mp3 --audio-backend qwen-local --qwen-model Qwen/Qwen3-ASR-1.7B
-uv run python main.py demo.mp3 --audio-backend qwen-local --qwen-model "D:/Coding/models/Qwen3-ASR-1.7B"
+uv run python main.py demo.mp3 --qwen-model Qwen/Qwen3-ASR-1.7B
+uv run python main.py demo.mp3 --qwen-model "D:/Coding/models/Qwen3-ASR-1.7B"
 ```
 
-如果你想显式控制设备，也可以这样写：
+如果你希望明确指定设备：
 
 ```bash
-# CPU
-uv run python main.py demo.mp3 --audio-backend qwen-local
+# CPU（默认）
+uv run python main.py demo.mp3
 
-# GPU（需 CUDA 版 torch）
-set ANY2MD_QWEN_AUDIO_DEVICE_MAP=cuda && uv run python main.py demo.mp3 --audio-backend qwen-local
+# GPU（需要支持 CUDA 的 torch）
+set ANY2MD_QWEN_AUDIO_DEVICE_MAP=cuda && uv run python main.py demo.mp3
 ```
 
-### 长音频交互方式
+### AUC 后端（可选）
 
-对于较长音频，推荐先提交任务，再稍后查询：
+要使用字节跳动 AUC 进行远程音频转录，需显式指定 `--audio-backend auc`：
 
 ```bash
-uv run python main.py "https://example.com/audio.mp3" --no-wait
+uv run python main.py "https://example.com/audio.mp3" --audio-backend auc
+```
+
+- AUC 模式仅支持直接远程音频 URL（不支持本地文件）。
+- 需要在 `.env` 中配置 AUC 凭证（见配置部分）。
+
+### 长音频交互方式（仅限 AUC 模式）
+
+对于较长音频，使用 AUC 后端时可以先提交任务，再稍后查询：
+
+```bash
+uv run python main.py "https://example.com/audio.mp3" --audio-backend auc --no-wait
 uv run python main.py --auc-status <task-id>
 uv run python main.py --auc-status <task-id> --output output/audio.md
 ```
 
+- `--no-wait` 提交单个远程音频 URL 后立即返回任务 ID（仅限 AUC 模式）。
+- `--auc-status <task-id>` 从本地任务缓存查询之前提交的任务（仅限 AUC 模式）。
+- 当任务在等待窗口后仍在处理时，CLI 会报告仍在处理中，而不是视为硬失败。
 - `--no-wait` 会提交单个远程音频 URL，并立即返回任务 ID。
 - `--auc-status <task-id>` 会从本地任务缓存中读取任务并查询当前状态。
 - 当任务在等待窗口内尚未完成时，CLI 会提示“仍在处理中”，而不是直接判定为失败。
@@ -168,7 +201,7 @@ uv run python main.py --auc-status <task-id> --output output/audio.md
 - 繁体转简体是按需加载的可选后处理能力。
 - 图片处理默认使用 LLM OCR，同时保留可扩展的 OCR 接口。
 - OCR 清洗会规范标题、列表，并将结构稳定的对齐文本块整理为 Markdown 表格。
-- 音频转录支持字节跳动 AUC API 与本地 Qwen3-ASR-1.7B 后端。
+- 音频转录默认使用本地 Qwen3-ASR，可通过 `--audio-backend auc` 选择字节跳动 AUC 支持。
 
 ## 支持的格式
 
@@ -178,8 +211,8 @@ uv run python main.py --auc-status <task-id> --output output/audio.md
 - `.txt`（自动识别 UTF-8 / UTF-16 BOM，必要时回退 GB18030）
 - `.docx`
 - `.jpg` / `.jpeg` / `.png`（需要在 `.env` 中配置 OCR）
-- 以 `.mp3`、`.wav`、`.m4a`、`.aac`、`.flac`、`.ogg` 结尾的直接音频 URL（AUC 或本地 Qwen 后端）
-- 当选择 `--audio-backend qwen-local` 时，也支持本地 `.mp3`、`.wav`、`.m4a`、`.aac`、`.flac`、`.ogg` 文件
+- 以 `.mp3`、`.wav`、`.m4a`、`.aac`、`.flac`、`.ogg` 结尾的直接音频 URL（默认使用本地 Qwen3-ASR，或通过 `--audio-backend auc` 使用 AUC）
+- 本地 `.mp3`、`.wav`、`.m4a`、`.aac`、`.flac`、`.ogg` 文件（默认通过本地 Qwen3-ASR 支持）
 
 ## 用法示例
 
@@ -226,8 +259,8 @@ uv run any2md input.docx --output output/
 ## 已知限制
 
 - 当前版本默认使用兼容 OpenAI Chat Completions 的视觉模型进行 OCR。
-- AUC 模式下，音频文件必须能通过直接 URL 访问。
-- 本地音频文件只在 `--audio-backend qwen-local` 模式下支持。
+- 本地音频文件默认支持（Qwen3-ASR 模式）。
+- 使用 AUC 模式（`--audio-backend auc`）时，音频文件必须能通过直接 URL 访问。
 - 提取质量依赖源文档质量以及上游解析库能力。
 - 运行日志和状态汇总写入 `stderr`，不会写入 `stdout`。
 - 不支持的文件会被跳过，而不是强制尝试转换。
@@ -236,9 +269,8 @@ uv run any2md input.docx --output output/
 
 - `--t2s` 会按需加载 OpenCC，并在提取完成后执行繁体转简体。
 - 图片转换默认使用兼容 OpenAI 的视觉聊天模型进行 OCR，并会清理常见包装文本；当结构足够稳定时，还会将对齐文本块整理为 Markdown 表格。
-- 音频转换支持字节跳动 AUC 和本地 Qwen3-ASR 两种方式。
+- 音频转换默认使用本地 Qwen3-ASR，可通过 `--audio-backend auc` 选择字节跳动 AUC 支持。
 - 视频文件会自动提取音轨后，使用选定的音频后端进行转录。
-- 当选择 `--audio-backend qwen-local` 时，支持本地音频文件。
 - 无论是不支持的文件直接传入，还是在目录扫描中发现，都会被标记为跳过。
 - 运行日志、单文件状态和汇总信息会输出到 `stderr`；`stdout` 预留给未来的内容输出能力。
 

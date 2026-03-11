@@ -68,6 +68,7 @@ name = "any2md"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiofiles" },
     { name = "ebooklib" },
     { name = "httpx" },
     { name = "mammoth" },
@@ -80,6 +81,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiofiles", specifier = ">=24.1.0" },
     { name = "ebooklib", specifier = ">=0.20" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mammoth", specifier = ">=1.8.0" },

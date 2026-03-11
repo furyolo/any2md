@@ -1,12 +1,16 @@
 ﻿from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Sequence
+from typing import Awaitable, Callable, Sequence
 from urllib.parse import unquote, urlparse
+
+import aiofiles
+import aiofiles.os
 
 from any2md.converters.audio import AudioTaskPendingError
 from any2md.errors import InputDiscoveryError, OutputPathError
@@ -76,6 +80,9 @@ class ConversionResult:
         return self.skipped and bool(
             self.message and self.message.startswith("Skipped by --resume-failed-only:")
         )
+
+
+ProgressCallback = Callable[[ConversionResult], Awaitable[None]]
 
 
 @dataclass(slots=True)
@@ -164,6 +171,8 @@ class ConversionService:
     ) -> None:
         self.registry = registry or build_default_registry()
         self._allow_local_audio_inputs = allow_local_audio_inputs
+        # 音频转换信号量，限制同时进行的音频转换数量为1
+        self._audio_semaphore = None
 
     def is_batch_mode(self, inputs: Sequence[str]) -> bool:
         return len(inputs) > 1 or any(Path(item).is_dir() for item in inputs)
@@ -650,6 +659,329 @@ class ConversionService:
         parsed = urlparse(raw_input)
         filename = Path(unquote(parsed.path)).name or parsed.netloc or "remote-media"
         return Path(filename)
+
+    async def run_async(
+        self,
+        inputs: Sequence[str],
+        recursive: bool = False,
+        output_path: str | None = None,
+        t2s: bool = False,
+        dry_run: bool = False,
+        force: bool = False,
+        resume_failed_only: bool = False,
+        max_concurrent: int = 5,
+        progress_callback: ProgressCallback | None = None,
+    ) -> RunSummary:
+        """Async version of run() with concurrent file processing."""
+        if max_concurrent < 1:
+            raise ValueError(f"max_concurrent must be at least 1, got {max_concurrent}")
+
+        jobs, results = self.discover_jobs(inputs, recursive=recursive)
+
+        # Determine batch mode and resolve output path
+        batch_mode = self.is_batch_mode(inputs)
+        output = Path(output_path) if output_path else None
+
+        # Load manifest for batch mode
+        manifest = self._load_batch_manifest(batch_mode=batch_mode, output_path=output)
+        hash_cache: dict[str, str] = {}
+
+        async def emit_result(result: ConversionResult) -> None:
+            if progress_callback is not None:
+                await progress_callback(result)
+
+        # Emit discovered results
+        for result in results:
+            await emit_result(result)
+
+        if not jobs:
+            return RunSummary(results=results)
+
+        # Filter jobs based on resume_failed_only
+        if resume_failed_only and batch_mode and manifest is not None:
+            filtered_jobs = []
+            for job in jobs:
+                try:
+                    planned_output = resolve_output_path(
+                        input_path=job.planning_path,
+                        batch_mode=batch_mode,
+                        output_path=output,
+                        raw_output_path=output_path,
+                        source_root=job.source_root,
+                    )
+                    manifest_entry = manifest.get(planned_output)
+                    if manifest_entry is None:
+                        result = ConversionResult(
+                            input_path=job.display_input,
+                            output_path=planned_output,
+                            status=ConversionStatus.SKIPPED,
+                            message=self._resume_failed_only_skip_message("no manifest entry"),
+                        )
+                        results.append(result)
+                        await emit_result(result)
+                        continue
+
+                    if manifest_entry.get("status") != "failed":
+                        result = ConversionResult(
+                            input_path=job.display_input,
+                            output_path=planned_output,
+                            status=ConversionStatus.SKIPPED,
+                            message=self._resume_failed_only_skip_message(
+                                f"last status is {manifest_entry.get('status', 'unknown')}"
+                            ),
+                        )
+                        results.append(result)
+                        await emit_result(result)
+                        continue
+
+                    filtered_jobs.append(job)
+                except OutputPathError:
+                    filtered_jobs.append(job)
+
+            jobs = filtered_jobs
+
+        if not jobs:
+            return RunSummary(results=self._sort_results(results))
+
+        # Handle dry-run mode
+        if dry_run:
+            for job in jobs:
+                try:
+                    planned_output = resolve_output_path(
+                        input_path=job.planning_path,
+                        batch_mode=batch_mode,
+                        output_path=output,
+                        raw_output_path=output_path,
+                        source_root=job.source_root,
+                    )
+                    result = ConversionResult(
+                        input_path=job.display_input,
+                        output_path=planned_output,
+                        status=ConversionStatus.PLANNED,
+                    )
+                except OutputPathError as exc:
+                    result = ConversionResult(
+                        input_path=job.display_input,
+                        output_path=None,
+                        status=ConversionStatus.FAILED,
+                        message=str(exc),
+                    )
+                results.append(result)
+                await emit_result(result)
+            return RunSummary(results=results)
+
+        semaphore = asyncio.Semaphore(max_concurrent)
+        # 初始化音频信号量（限制音频转换并发为1）
+        if self._audio_semaphore is None:
+            self._audio_semaphore = asyncio.Semaphore(1)
+
+        async def process_with_semaphore(job: ConversionJob) -> ConversionResult:
+            async with semaphore:
+                # 检查是否是音频文件
+                is_audio = job.planning_path.suffix.lower() in self.LOCAL_AUDIO_SUFFIXES or \
+                           job.planning_path.suffix.lower() in {".mp4", ".avi", ".mkv", ".mov", ".flv", ".wmv", ".webm", ".m4v"}
+
+                # 如果是音频/视频文件，额外获取音频信号量
+                if is_audio:
+                    async with self._audio_semaphore:
+                        result = await self._convert_single_async(
+                            job, batch_mode, output, output_path, t2s, force, resume_failed_only
+                        )
+                else:
+                    result = await self._convert_single_async(
+                        job, batch_mode, output, output_path, t2s, force, resume_failed_only
+                    )
+
+                # Update manifest
+                if manifest is not None and not dry_run:
+                    input_hash = self._cached_input_hash(job.converter_input, hash_cache)
+                    status = self._manifest_status_for_result(result)
+                    if status is not None and result.output_path is not None:
+                        manifest.update(
+                            output_path=result.output_path,
+                            input_path=result.input_path,
+                            input_hash=input_hash,
+                            status=status,
+                            last_run_at=self._current_timestamp(),
+                            last_error=None if status == "converted" else result.message,
+                            task_id=result.task_id,
+                        )
+
+                await emit_result(result)
+                return result
+
+        # Use asyncio.as_completed for real-time progress
+        tasks = [process_with_semaphore(job) for job in jobs]
+        for coro in asyncio.as_completed(tasks):
+            try:
+                result = await coro
+                results.append(result)
+            except Exception as exc:
+                # This should not happen as exceptions are caught in _convert_single_async
+                # But handle it just in case
+                results.append(
+                    ConversionResult(
+                        input_path="<unknown>",
+                        output_path=None,
+                        status=ConversionStatus.FAILED,
+                        message=f"Unexpected error: {str(exc)}",
+                    )
+                )
+
+        # Save manifest
+        if manifest is not None and not dry_run:
+            manifest.save()
+
+        return RunSummary(results=self._sort_results(results))
+
+    async def _convert_single_async(
+        self,
+        job: ConversionJob,
+        batch_mode: bool,
+        output_path: Path | None,
+        raw_output_path: str | None,
+        t2s: bool,
+        force: bool,
+        resume_failed_only: bool,
+    ) -> ConversionResult:
+        """Async version of _convert_single()."""
+        try:
+            resolved_output = resolve_output_path(
+                input_path=job.planning_path,
+                batch_mode=batch_mode,
+                output_path=output_path,
+                raw_output_path=raw_output_path,
+                source_root=job.source_root,
+            )
+        except OutputPathError as exc:
+            return ConversionResult(
+                input_path=job.display_input,
+                output_path=None,
+                status=ConversionStatus.FAILED,
+                message=str(exc),
+            )
+
+        # Check resume state (only for non-batch mode or audio resume)
+        if resume_failed_only and not batch_mode:
+            if not has_resume_state(resolved_output):
+                return ConversionResult(
+                    input_path=job.display_input,
+                    output_path=resolved_output,
+                    status=ConversionStatus.SKIPPED,
+                    message=f"Skipped by --resume-failed-only: {resolved_output}",
+                )
+
+        # Check if output exists (non-batch mode should fail, batch mode should skip)
+        if resolved_output.exists() and not force and not has_resume_state(resolved_output):
+            if not batch_mode:
+                return ConversionResult(
+                    input_path=job.display_input,
+                    output_path=None,
+                    status=ConversionStatus.FAILED,
+                    message=f"Output already exists: {resolved_output}. Use --force to overwrite.",
+                )
+            # In batch mode, skip already converted files
+            return ConversionResult(
+                input_path=job.display_input,
+                output_path=resolved_output,
+                status=ConversionStatus.SKIPPED,
+                message=f"Already converted: {resolved_output}",
+            )
+
+        # Async file lock
+        lock_acquired = await self._try_acquire_async_lock(resolved_output, force)
+        if not lock_acquired:
+            return ConversionResult(
+                input_path=job.display_input,
+                output_path=resolved_output,
+                status=ConversionStatus.SKIPPED,
+                message=f"Already converted: {resolved_output}",
+            )
+
+        try:
+            # Use registry.convert() which handles converter selection
+            markdown = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.registry.convert(
+                    job.converter_input,
+                    suffix=job.planning_path.suffix,
+                    output_path=resolved_output
+                )
+            )
+
+            # Extract metadata
+            conversion_message = None
+            source_encoding = getattr(markdown, "source_encoding", None)
+            if source_encoding:
+                conversion_message = f"encoding={source_encoding}"
+
+            # Post-process
+            if t2s:
+                markdown = apply_postprocess(markdown, t2s=t2s)
+
+            # Write output
+            resolved_output.parent.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(resolved_output, "w", encoding="utf-8") as f:
+                await f.write(markdown)
+
+            # Remove resume state if exists
+            state_path = resume_state_path(resolved_output)
+            if await aiofiles.os.path.exists(state_path):
+                await aiofiles.os.remove(state_path)
+
+            return ConversionResult(
+                input_path=job.display_input,
+                output_path=resolved_output,
+                status=ConversionStatus.CONVERTED,
+                message=conversion_message,
+            )
+
+        except AudioTaskPendingError as exc:
+            return ConversionResult(
+                input_path=job.display_input,
+                output_path=resolved_output,
+                status=ConversionStatus.PENDING,
+                message=str(exc),
+                task_id=exc.task.task_id,
+            )
+        except Exception as exc:
+            return ConversionResult(
+                input_path=job.display_input,
+                output_path=resolved_output,
+                status=ConversionStatus.FAILED,
+                message=self._format_error(exc, resolved_output),
+            )
+        finally:
+            await self._release_async_lock(resolved_output)
+
+    async def _try_acquire_async_lock(self, output_path: Path, force: bool) -> bool:
+        """Async file lock acquisition."""
+        from any2md.io_state import output_lock_path
+        lock_path = output_lock_path(output_path)
+
+        # Check if already converted (unless force mode)
+        if not force and output_path.exists() and not has_resume_state(output_path):
+            return False
+
+        # Try to create lock file
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            # Use aiofiles for async file creation
+            async with aiofiles.open(lock_path, "x") as f:
+                await f.write(str(datetime.now(timezone.utc)))
+            return True
+        except FileExistsError:
+            return False
+
+    async def _release_async_lock(self, output_path: Path) -> None:
+        """Release async file lock."""
+        from any2md.io_state import output_lock_path
+        lock_path = output_lock_path(output_path)
+        try:
+            if await aiofiles.os.path.exists(lock_path):
+                await aiofiles.os.remove(lock_path)
+        except Exception:
+            pass  # Best effort cleanup
 
 
 def convert(input_path: str, output_path: str | None = None, t2s: bool = False) -> None:

@@ -99,61 +99,91 @@ uv run any2md input.docx --output output/
 uv run python main.py docs/ --output output/ --recursive
 ```
 
-### Audio input rules
+### Async and concurrency control
 
-> AUC mode supports direct remote audio URLs; local mode supports both local files and direct URLs.
-
-- Supported input: `http://` or `https://` audio URLs.
-- Unsupported in AUC mode: local audio files such as `demo.mp3` or `record.wav`.
-- Supported URL suffixes: `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg`.
-
-### Local Qwen3-ASR backend
-
-Use the new independent backend when you want fully local transcription:
+By default, any2md uses asynchronous processing for better performance when converting multiple files:
 
 ```bash
-uv run python main.py demo.mp3 --audio-backend qwen-local
-uv run python main.py demo.wav --audio-backend qwen-local --output output/demo.md
-uv run python main.py demo.flac --audio-backend qwen-local --qwen-runtime qwen-asr
-uv run python main.py "https://example.com/audio.mp3" --audio-backend qwen-local
+# Default: async mode with 5 concurrent conversions
+uv run python main.py docs/ --output output/ --recursive
+
+# Control concurrency level
+uv run python main.py docs/ --output output/ --recursive --max-concurrent 10
+
+# Force synchronous mode (process files one by one)
+uv run python main.py docs/ --output output/ --recursive --sync
 ```
 
-- `--audio-backend qwen-local` enables local audio transcription and accepts local audio files.
+- `--max-concurrent N`: Set maximum concurrent file conversions (default: 5)
+- `--sync`: Force synchronous mode instead of async processing
+
+Async mode significantly improves performance for batch conversions, especially when processing files that involve network requests (OCR, audio transcription).
+
+### Audio input rules
+
+> By default, any2md uses local Qwen3-ASR for offline transcription and supports both local files and direct URLs. AUC mode requires explicit `--audio-backend auc` and only supports remote URLs.
+
+- **Default (Qwen3-ASR)**: Supports local audio files (e.g., `demo.mp3`, `record.wav`) and direct `http://` or `https://` audio URLs.
+- **AUC mode**: Requires `--audio-backend auc` and only supports direct remote audio URLs.
+- Supported audio suffixes: `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg`.
+
+### Default: Local Qwen3-ASR backend
+
+Local Qwen3-ASR is the default audio transcription backend and requires no additional parameters:
+
+```bash
+uv run python main.py demo.mp3
+uv run python main.py demo.wav --output output/demo.md
+uv run python main.py demo.flac --qwen-runtime qwen-asr
+uv run python main.py "https://example.com/audio.mp3"
+```
+
+- Local audio transcription is enabled by default and accepts both local audio files and direct URLs.
 - `--qwen-runtime qwen-asr` is the recommended default and works with the official `Qwen/Qwen3-ASR-1.7B` model ID or a local pretrained model directory.
 - `--qwen-runtime chatllm.cpp` works with chatllm.cpp-native model formats such as `.bin`, not with `.gguf`.
 - `--qwen-runtime llama.cpp` only works when the upstream version already supports the `qwen3-asr` architecture; only provide `--qwen-command-template` or `ANY2MD_QWEN_AUDIO_COMMAND_TEMPLATE` if you need custom launch arguments.
 - The local backend also accepts direct audio URLs and downloads them to a temporary file before transcription.
-- `--no-wait` and `--auc-status` remain AUC-only options.
 
 If you want to explicitly control the model source, you can also use:
 
 ```bash
-uv run python main.py demo.mp3 --audio-backend qwen-local --qwen-model Qwen/Qwen3-ASR-1.7B
-uv run python main.py demo.mp3 --audio-backend qwen-local --qwen-model "D:/Coding/models/Qwen3-ASR-1.7B"
+uv run python main.py demo.mp3 --qwen-model Qwen/Qwen3-ASR-1.7B
+uv run python main.py demo.mp3 --qwen-model "D:/Coding/models/Qwen3-ASR-1.7B"
 ```
 
 If you want to explicitly control the device:
 
 ```bash
-# CPU
-uv run python main.py demo.mp3 --audio-backend qwen-local
+# CPU (default)
+uv run python main.py demo.mp3
 
 # GPU (requires CUDA-enabled torch)
-set ANY2MD_QWEN_AUDIO_DEVICE_MAP=cuda && uv run python main.py demo.mp3 --audio-backend qwen-local
+set ANY2MD_QWEN_AUDIO_DEVICE_MAP=cuda && uv run python main.py demo.mp3
 ```
 
-### Long audio workflow
+### AUC backend (optional)
 
-For longer audio, you can submit first and check later:
+To use ByteDance AUC for remote audio transcription, explicitly specify `--audio-backend auc`:
 
 ```bash
-uv run python main.py "https://example.com/audio.mp3" --no-wait
+uv run python main.py "https://example.com/audio.mp3" --audio-backend auc
+```
+
+- AUC mode only supports direct remote audio URLs (not local files).
+- Requires AUC credentials in `.env` (see Configuration section).
+
+### Long audio workflow (AUC mode only)
+
+For longer audio with AUC backend, you can submit first and check later:
+
+```bash
+uv run python main.py "https://example.com/audio.mp3" --audio-backend auc --no-wait
 uv run python main.py --auc-status <task-id>
 uv run python main.py --auc-status <task-id> --output output/audio.md
 ```
 
-- `--no-wait` submits a single remote audio URL and returns a task ID immediately.
-- `--auc-status <task-id>` checks a previously submitted task from the local task cache.
+- `--no-wait` submits a single remote audio URL and returns a task ID immediately (AUC mode only).
+- `--auc-status <task-id>` checks a previously submitted task from the local task cache (AUC mode only).
 - When a task is still processing after the wait window, the CLI reports it as still processing instead of treating it as a hard failure.
 
 ## Features
@@ -168,7 +198,7 @@ uv run python main.py --auc-status <task-id> --output output/audio.md
 - Traditional-to-Simplified Chinese conversion is optional and loaded only when needed.
 - Image handling uses LLM OCR by default while keeping the OCR interface extensible.
 - OCR cleanup can normalize headings and lists, and convert aligned text blocks into Markdown tables.
-- Audio transcription supports both ByteDance AUC and a local Qwen3-ASR backend.
+- Audio transcription uses local Qwen3-ASR by default, with optional ByteDance AUC support via `--audio-backend auc`.
 
 ## Supported formats
 
@@ -178,8 +208,8 @@ uv run python main.py --auc-status <task-id> --output output/audio.md
 - `.txt` (auto-detects UTF-8 / UTF-16 BOM, with GB18030 fallback)
 - `.docx`
 - `.jpg` / `.jpeg` / `.png` (requires LLM OCR settings in `.env`)
-- Direct audio URLs ending in `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, or `.ogg` (AUC or local Qwen backend)
-- Local `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg` files when `--audio-backend qwen-local` is selected
+- Direct audio URLs ending in `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, or `.ogg` (local Qwen3-ASR by default, or AUC with `--audio-backend auc`)
+- Local `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg` files (supported by default via local Qwen3-ASR)
 
 ## Usage
 
@@ -233,8 +263,8 @@ uv run any2md input.docx --output output/
 ## Known limitations
 
 - This version uses an OpenAI-compatible vision chat model for OCR by default.
-- In AUC mode, audio files must be accessible via direct URL.
-- Local audio file paths are supported when `--audio-backend qwen-local` is selected.
+- Local audio file paths are supported by default (Qwen3-ASR mode).
+- When using AUC mode (`--audio-backend auc`), audio files must be accessible via direct URL.
 - Extraction quality depends on the source document quality and the upstream parsing libraries.
 - Runtime logs and status summaries are written to `stderr`, not `stdout`.
 - Unsupported files are skipped instead of being force-converted.
@@ -243,9 +273,8 @@ uv run any2md input.docx --output output/
 
 - `--t2s` lazily loads OpenCC and applies Traditional-to-Simplified Chinese conversion after extraction.
 - Image conversion uses an OpenAI-compatible vision chat model by default, strips common wrapper text from OCR output, and converts aligned text blocks into Markdown tables when the structure is stable enough.
-- Audio conversion supports both ByteDance AUC and the local Qwen3-ASR backend.
+- Audio conversion uses local Qwen3-ASR by default, with optional ByteDance AUC support via `--audio-backend auc`.
 - Video files are automatically processed by extracting audio tracks first, then transcribed using the selected audio backend.
-- Local audio files are supported when `--audio-backend qwen-local` is selected.
 - Unsupported files are reported as skipped whether they are passed directly or discovered during directory scanning.
 - Operational logs, per-file statuses, and summaries are written to stderr. Stdout is reserved for future content output.
 

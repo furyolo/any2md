@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -48,8 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--audio-backend",
         choices=["auc", "qwen-local"],
-        default="auc",
-        help="Choose the audio transcription backend.",
+        default="qwen-local",
+        help="Choose the audio transcription backend (default: qwen-local for offline processing).",
     )
     parser.add_argument(
         "--no-wait",
@@ -93,6 +94,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="In batch mode, only retry files marked as failed in .any2md-manifest.json.",
     )
+    parser.add_argument(
+        "--max-concurrent",
+        type=int,
+        default=5,
+        help="Maximum concurrent file conversions (default: 5)",
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Force synchronous mode instead of async",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -132,37 +144,71 @@ def main(
     )
 
     try:
-        summary = service.run(
-            inputs=args.inputs,
-            recursive=args.recursive,
-            output_path=args.output,
-            t2s=args.t2s,
-            dry_run=args.dry_run,
-            force=args.force,
-            resume_failed_only=args.resume_failed_only,
-        )
+        if args.sync:
+            summary = service.run(
+                inputs=args.inputs,
+                recursive=args.recursive,
+                output_path=args.output,
+                t2s=args.t2s,
+                dry_run=args.dry_run,
+                force=args.force,
+                resume_failed_only=args.resume_failed_only,
+            )
+        else:
+            async def progress_callback(result):
+                if result.succeeded:
+                    detail = f" ({result.message})" if result.message else ""
+                    print(f"Converted {result.input_path} -> {result.output_path}{detail}", file=error_stream)
+                elif result.planned:
+                    print(f"Planned {result.input_path} -> {result.output_path}", file=error_stream)
+                elif result.pending:
+                    print(f"Processing {result.input_path}: {result.message}", file=error_stream)
+                    if result.task_id:
+                        print(f"Task ID: {result.task_id}", file=error_stream)
+                        print(
+                            f"Continue later with: uv run main.py --auc-status {result.task_id}",
+                            file=error_stream,
+                        )
+                elif result.skipped:
+                    print(f"Skipped {result.input_path}: {result.message}", file=error_stream)
+                else:
+                    print(f"Failed {result.input_path}: {result.error}", file=error_stream)
+
+            summary = asyncio.run(service.run_async(
+                inputs=args.inputs,
+                recursive=args.recursive,
+                output_path=args.output,
+                t2s=args.t2s,
+                dry_run=args.dry_run,
+                force=args.force,
+                resume_failed_only=args.resume_failed_only,
+                max_concurrent=args.max_concurrent,
+                progress_callback=progress_callback,
+            ))
     except Any2MDError as exc:
         print(str(exc), file=error_stream)
         return 1
 
-    for result in summary.results:
-        if result.succeeded:
-            detail = f" ({result.message})" if result.message else ""
-            print(f"Converted {result.input_path} -> {result.output_path}{detail}", file=error_stream)
-        elif result.planned:
-            print(f"Planned {result.input_path} -> {result.output_path}", file=error_stream)
-        elif result.pending:
-            print(f"Processing {result.input_path}: {result.message}", file=error_stream)
-            if result.task_id:
-                print(f"Task ID: {result.task_id}", file=error_stream)
-                print(
-                    f"Continue later with: uv run main.py --auc-status {result.task_id}",
-                    file=error_stream,
-                )
-        elif result.skipped:
-            print(f"Skipped {result.input_path}: {result.message}", file=error_stream)
-        else:
-            print(f"Failed {result.input_path}: {result.error}", file=error_stream)
+    # Print per-file results for sync mode
+    if args.sync:
+        for result in summary.results:
+            if result.succeeded:
+                detail = f" ({result.message})" if result.message else ""
+                print(f"Converted {result.input_path} -> {result.output_path}{detail}", file=error_stream)
+            elif result.planned:
+                print(f"Planned {result.input_path} -> {result.output_path}", file=error_stream)
+            elif result.pending:
+                print(f"Processing {result.input_path}: {result.message}", file=error_stream)
+                if result.task_id:
+                    print(f"Task ID: {result.task_id}", file=error_stream)
+                    print(
+                        f"Continue later with: uv run main.py --auc-status {result.task_id}",
+                        file=error_stream,
+                    )
+            elif result.skipped:
+                print(f"Skipped {result.input_path}: {result.message}", file=error_stream)
+            else:
+                print(f"Failed {result.input_path}: {result.error}", file=error_stream)
 
     print(
         (
