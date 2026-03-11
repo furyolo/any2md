@@ -147,6 +147,44 @@ class OcrTests(unittest.TestCase):
 
         self.assertEqual(result, "# 标题\n\n正文")
 
+    def test_llm_ocr_engine_supports_anthropic_api(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_http_client(request, timeout):
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeHttpResponse({"content": [{"type": "text", "text": "# 标题\n\n正文"}]})
+
+        settings = LlmOcrSettings(
+            api_base="https://api.anthropic.com/v1",
+            api_key="sk-ant-secret",
+            model="claude-3-5-sonnet-20241022",
+            timeout=15.0,
+            prompt="请输出 Markdown",
+        )
+
+        case_dir = _make_case_dir()
+        try:
+            image_path = case_dir / "sample.png"
+            image_path.write_bytes(b"fake-image")
+            engine = LlmVisionOcrEngine(settings=settings, http_client=fake_http_client)
+
+            result = engine.extract_text(image_path)
+        finally:
+            shutil.rmtree(case_dir, ignore_errors=True)
+
+        self.assertEqual(result, "# 标题\n\n正文")
+        self.assertEqual(captured["url"], "https://api.anthropic.com/v1/messages")
+        self.assertEqual(captured["headers"]["x-api-key"], "sk-ant-secret")
+        self.assertEqual(captured["headers"]["anthropic-version"], "2023-06-01")
+        payload = captured["payload"]
+        self.assertEqual(payload["model"], "claude-3-5-sonnet-20241022")
+        self.assertEqual(payload["max_tokens"], 4096)
+        self.assertEqual(payload["messages"][0]["content"][0]["text"], "请输出 Markdown")
+        self.assertEqual(payload["messages"][0]["content"][1]["type"], "image")
+        self.assertEqual(payload["messages"][0]["content"][1]["source"]["type"], "base64")
+
 
 def _tracked_env_keys() -> tuple[str, ...]:
     return (

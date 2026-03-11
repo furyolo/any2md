@@ -34,6 +34,7 @@ class LlmOcrSettings:
     model: str
     timeout: float = 60.0
     prompt: str = DEFAULT_OCR_PROMPT
+    api_type: str | None = None  # "openai" or "anthropic", auto-detected if None
 
 
 def load_env_file(env_path: Path | None = None, *, override: bool = False) -> dict[str, str]:
@@ -80,6 +81,7 @@ def resolve_llm_ocr_settings(
     model = _first_value(source, "ANY2MD_LLM_MODEL", "LLM_MODEL", "OPENAI_MODEL")
     timeout_value = _first_value(source, "ANY2MD_LLM_TIMEOUT", "LLM_TIMEOUT")
     prompt = _first_value(source, "ANY2MD_OCR_PROMPT", "OCR_PROMPT") or DEFAULT_OCR_PROMPT
+    api_type = _first_value(source, "ANY2MD_LLM_API_TYPE", "LLM_API_TYPE") or None
 
     missing = [
         name
@@ -106,12 +108,19 @@ def resolve_llm_ocr_settings(
                 "OCR 超时时间配置无效，请将 ANY2MD_LLM_TIMEOUT 设置为数字。"
             ) from exc
 
+    # Validate api_type if provided
+    if api_type and api_type not in ("openai", "anthropic"):
+        raise OcrNotConfiguredError(
+            f"无效的 API 类型：{api_type}。请设置为 'openai' 或 'anthropic'。"
+        )
+
     return LlmOcrSettings(
         api_base=api_base,
         api_key=api_key,
         model=model,
         timeout=timeout,
         prompt=prompt,
+        api_type=api_type,
     )
 
 
@@ -129,7 +138,11 @@ class LlmVisionOcrEngine:
 
     def extract_text(self, path: Path) -> str:
         settings = self._settings or resolve_llm_ocr_settings(env_path=self._env_path)
-        request = self._build_request(path=path, settings=settings)
+
+        # Detect API type
+        api_type = settings.api_type or _detect_api_type(settings.api_base, settings.model)
+
+        request = self._build_request(path=path, settings=settings, api_type=api_type)
 
         try:
             with self._http_client(request, timeout=settings.timeout) as response:
@@ -144,42 +157,25 @@ class LlmVisionOcrEngine:
         except json.JSONDecodeError as exc:
             raise OcrRequestError("OCR 响应不是合法的 JSON。") from exc
 
-        markdown = _extract_message_content(payload)
+        markdown = _extract_message_content(payload, api_type)
         if not markdown:
             raise OcrRequestError("OCR 响应中没有可用内容。")
         return _strip_markdown_fence(markdown)
 
-    def _build_request(self, *, path: Path, settings: LlmOcrSettings) -> Request:
+    def _build_request(self, *, path: Path, settings: LlmOcrSettings, api_type: str) -> Request:
         image_bytes = path.read_bytes()
         mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         encoded_image = base64.b64encode(image_bytes).decode("ascii")
-        endpoint = _resolve_chat_completions_url(settings.api_base)
-        payload = {
-            "model": settings.model,
-            "temperature": 0,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": settings.prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime_type};base64,{encoded_image}"
-                            },
-                        },
-                    ],
-                }
-            ],
-        }
+
+        endpoint = _resolve_api_endpoint(settings.api_base, api_type)
+        payload = _build_api_payload(settings, encoded_image, mime_type, api_type)
+        headers = _build_api_headers(settings.api_key, api_type)
+
         body = json.dumps(payload).encode("utf-8")
         return Request(
             endpoint,
             data=body,
-            headers={
-                "Authorization": f"Bearer {settings.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
 
@@ -202,8 +198,36 @@ def _normalize_env_value(value: str) -> str:
     return value
 
 
-def _resolve_chat_completions_url(api_base: str) -> str:
+def _detect_api_type(api_base: str, model: str) -> str:
+    """Detect API type from base URL or model name."""
+    normalized = api_base.lower()
+
+    # Check URL patterns
+    if "anthropic" in normalized or "claude" in normalized:
+        return "anthropic"
+
+    # Check model name patterns
+    model_lower = model.lower()
+    if model_lower.startswith("claude"):
+        return "anthropic"
+
+    # Default to OpenAI-compatible
+    return "openai"
+
+
+def _resolve_api_endpoint(api_base: str, api_type: str) -> str:
+    """Resolve the correct API endpoint based on API type."""
     normalized = api_base.rstrip("/")
+
+    if api_type == "anthropic":
+        # Anthropic uses /v1/messages or /v1/responses
+        if normalized.endswith("/messages") or normalized.endswith("/responses"):
+            return normalized
+        if normalized.endswith("/v1"):
+            return f"{normalized}/messages"
+        return f"{normalized}/v1/messages"
+
+    # OpenAI-compatible format
     if normalized.endswith("/chat/completions"):
         return normalized
     if normalized.endswith("/v1"):
@@ -211,7 +235,91 @@ def _resolve_chat_completions_url(api_base: str) -> str:
     return f"{normalized}/v1/chat/completions"
 
 
-def _extract_message_content(payload: dict[str, object]) -> str:
+def _build_api_payload(
+    settings: LlmOcrSettings,
+    encoded_image: str,
+    mime_type: str,
+    api_type: str,
+) -> dict:
+    """Build API request payload based on API type."""
+    if api_type == "anthropic":
+        # Anthropic Messages API format
+        return {
+            "model": settings.model,
+            "max_tokens": 4096,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": settings.prompt},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime_type,
+                                "data": encoded_image,
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+
+    # OpenAI-compatible format
+    return {
+        "model": settings.model,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": settings.prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{encoded_image}"
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def _build_api_headers(api_key: str, api_type: str) -> dict[str, str]:
+    """Build API request headers based on API type."""
+    if api_type == "anthropic":
+        return {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+
+    # OpenAI-compatible format
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+
+def _extract_message_content(payload: dict[str, object], api_type: str) -> str:
+    """Extract text content from API response based on API type."""
+    if api_type == "anthropic":
+        # Anthropic Messages API response format
+        content = payload.get("content")
+        if not isinstance(content, list) or not content:
+            return ""
+
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+                if isinstance(text, str):
+                    parts.append(text.strip())
+
+        return "\n".join(parts).strip()
+
+    # OpenAI-compatible format
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
         return ""
@@ -288,36 +396,18 @@ async def ocr_image_async(
     if on_progress:
         on_progress(f"Reading image: {image_path.name}")
 
+    # Detect API type
+    api_type = settings.api_type or _detect_api_type(settings.api_base, settings.model)
+
     # Encode image to base64
     image_bytes = image_path.read_bytes()
     encoded_image = base64.b64encode(image_bytes).decode("ascii")
     mime_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
 
-    payload = {
-        "model": settings.model,
-        "temperature": 0,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": settings.prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{mime_type};base64,{encoded_image}"
-                        },
-                    },
-                ],
-            }
-        ],
-    }
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {settings.api_key}",
-    }
-
-    endpoint = _resolve_chat_completions_url(settings.api_base)
+    # Build request payload and headers based on API type
+    payload = _build_api_payload(settings, encoded_image, mime_type, api_type)
+    headers = _build_api_headers(settings.api_key, api_type)
+    endpoint = _resolve_api_endpoint(settings.api_base, api_type)
 
     if on_progress:
         on_progress(f"Sending OCR request to {settings.model}")
@@ -355,7 +445,7 @@ async def ocr_image_async(
     except Exception as e:
         raise OcrRequestError(f"Unexpected error during OCR: {e}") from e
 
-    text = _extract_message_content(result)
+    text = _extract_message_content(result, api_type)
     cleaned = _strip_markdown_fence(text)
 
     if on_progress:

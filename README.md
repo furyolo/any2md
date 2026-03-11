@@ -55,6 +55,11 @@ ANY2MD_LLM_API_KEY=sk-your-api-key
 ANY2MD_LLM_MODEL=gpt-4.1-mini
 ```
 
+Supports both OpenAI and Anthropic APIs with automatic detection:
+- OpenAI example: `ANY2MD_LLM_API_BASE=https://api.openai.com/v1`, `ANY2MD_LLM_MODEL=gpt-4o-mini`
+- Anthropic example: `ANY2MD_LLM_API_BASE=https://api.anthropic.com/v1`, `ANY2MD_LLM_MODEL=claude-3-5-sonnet-20241022`
+- For third-party proxies where auto-detection fails, manually specify: `ANY2MD_LLM_API_TYPE=anthropic` (options: `openai` or `anthropic`)
+
 **For audio transcription:**
 
 ```env
@@ -262,7 +267,7 @@ uv run any2md input.docx --output output/
 
 ## Known limitations
 
-- This version uses an OpenAI-compatible vision chat model for OCR by default.
+- Image OCR supports OpenAI and Anthropic-compatible vision models, with automatic API type detection based on URL or model name.
 - Local audio file paths are supported by default (Qwen3-ASR mode).
 - When using AUC mode (`--audio-backend auc`), audio files must be accessible via direct URL.
 - Extraction quality depends on the source document quality and the upstream parsing libraries.
@@ -272,7 +277,7 @@ uv run any2md input.docx --output output/
 ## Notes
 
 - `--t2s` lazily loads OpenCC and applies Traditional-to-Simplified Chinese conversion after extraction.
-- Image conversion uses an OpenAI-compatible vision chat model by default, strips common wrapper text from OCR output, and converts aligned text blocks into Markdown tables when the structure is stable enough.
+- Image conversion supports OpenAI and Anthropic-compatible vision models for OCR, with automatic API type detection and appropriate endpoint formatting (OpenAI: `/v1/chat/completions`, Anthropic: `/v1/messages`).
 - Audio conversion uses local Qwen3-ASR by default, with optional ByteDance AUC support via `--audio-backend auc`.
 - Video files are automatically processed by extracting audio tracks first, then transcribed using the selected audio backend.
 - Unsupported files are reported as skipped whether they are passed directly or discovered during directory scanning.
