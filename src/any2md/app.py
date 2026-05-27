@@ -40,6 +40,14 @@ class ConversionJob:
 
 
 @dataclass(slots=True)
+class ConversionPlan:
+    planned_outputs: dict[int, Path] = field(default_factory=dict)
+    planning_errors: dict[int, str] = field(default_factory=dict)
+    planning_skips: dict[int, str] = field(default_factory=dict)
+    overwrite_jobs: set[int] = field(default_factory=set)
+
+
+@dataclass(slots=True)
 class ConversionResult:
     input_path: str
     output_path: Path | None
@@ -315,6 +323,16 @@ class ConversionService:
         results: list[ConversionResult] = []
         manifest = self._load_batch_manifest(batch_mode=batch_mode, output_path=output)
         hash_cache: dict[str, str] = {}
+        plan = self._plan_jobs(
+            jobs=jobs,
+            batch_mode=batch_mode,
+            output=output,
+            raw_output_path=output_path,
+            resume_failed_only=resume_failed_only,
+            force=force,
+            manifest=manifest,
+            hash_cache=hash_cache,
+        )
 
         def append_result(
             result: ConversionResult,
@@ -323,124 +341,21 @@ class ConversionService:
             persist_manifest: bool = True,
         ) -> None:
             results.append(result)
-            if manifest is None or dry_run or not persist_manifest:
-                return
-
-            input_hash = self._input_hash_for_result(result=result, job=job, hash_cache=hash_cache)
-            if input_hash is None:
-                return
-
-            status = self._manifest_status_for_result(result)
-            if status is None:
-                return
-
-            output_target = result.output_path
-            if output_target is None and job is not None:
-                output_target = planned_outputs.get(job.sequence)
-            if output_target is None:
-                return
-
-            manifest.update(
-                output_path=output_target,
-                input_path=result.input_path,
-                input_hash=input_hash,
-                status=status,
-                last_run_at=self._current_timestamp(),
-                last_error=None if status == "converted" else result.message,
-                task_id=result.task_id,
+            self._update_manifest_from_result(
+                manifest=manifest,
+                dry_run=dry_run,
+                result=result,
+                job=job,
+                hash_cache=hash_cache,
+                planned_outputs=plan.planned_outputs,
+                persist_manifest=persist_manifest,
             )
 
         for result in discovered_results:
             append_result(result)
 
-        planned_outputs: dict[int, Path] = {}
-        planning_errors: dict[int, str] = {}
-        planning_skips: dict[int, str] = {}
-        overwrite_jobs: set[int] = set()
         for job in jobs:
-            try:
-                planned_outputs[job.sequence] = resolve_output_path(
-                    input_path=job.planning_path,
-                    batch_mode=batch_mode,
-                    output_path=output,
-                    raw_output_path=output_path,
-                    source_root=job.source_root,
-                )
-            except OutputPathError as exc:
-                planning_errors[job.sequence] = str(exc)
-
-        seen_outputs: dict[Path, ConversionJob] = {}
-        for job in jobs:
-            if resume_failed_only and batch_mode:
-                target = planned_outputs.get(job.sequence)
-                if target is None:
-                    continue
-
-                manifest_entry = manifest.get(target) if manifest is not None else None
-                if manifest_entry is None:
-                    planning_skips[job.sequence] = self._resume_failed_only_skip_message(
-                        "no manifest entry"
-                    )
-                    planned_outputs.pop(job.sequence, None)
-                    continue
-
-                if manifest_entry.get("status") != "failed":
-                    planning_skips[job.sequence] = self._resume_failed_only_skip_message(
-                        f"last status is {manifest_entry.get('status', 'unknown')}"
-                    )
-                    planned_outputs.pop(job.sequence, None)
-
-        for job in jobs:
-            target = planned_outputs.get(job.sequence)
-            if target is None:
-                continue
-
-            normalized = target.resolve()
-            previous = seen_outputs.get(normalized)
-            if previous is None:
-                seen_outputs[normalized] = job
-                continue
-
-            error = (
-                f"Output path collision: {previous.display_input} and "
-                f"{job.display_input} both map to {target}"
-            )
-            planning_errors[previous.sequence] = error
-            planning_errors[job.sequence] = error
-            planned_outputs.pop(previous.sequence, None)
-            planned_outputs.pop(job.sequence, None)
-
-        for job in jobs:
-            target = planned_outputs.get(job.sequence)
-            if target is None:
-                continue
-
-            if target.exists() and not force:
-                if not has_resume_state(target):
-                    should_remove_planned_output = True
-                    if batch_mode:
-                        manifest_entry = manifest.get(target) if manifest is not None else None
-                        if manifest_entry is None:
-                            planning_skips[job.sequence] = self._already_done_message(target)
-                        else:
-                            current_hash = self._cached_input_hash(job.converter_input, hash_cache)
-                            if (
-                                manifest_entry.get("status") == "converted"
-                                and manifest_entry.get("input_hash") == current_hash
-                            ):
-                                planning_skips[job.sequence] = self._already_done_message(target)
-                            else:
-                                overwrite_jobs.add(job.sequence)
-                                should_remove_planned_output = False
-                    else:
-                        planning_errors[job.sequence] = (
-                            f"Output already exists: {target}. Use --force to overwrite."
-                        )
-                    if should_remove_planned_output:
-                        planned_outputs.pop(job.sequence, None)
-
-        for job in jobs:
-            error = planning_errors.get(job.sequence)
+            error = plan.planning_errors.get(job.sequence)
             if error is not None:
                 append_result(
                     ConversionResult(
@@ -453,13 +368,13 @@ class ConversionService:
                 )
                 continue
 
-            skip_message = planning_skips.get(job.sequence)
+            skip_message = plan.planning_skips.get(job.sequence)
             if skip_message is not None:
                 persist_manifest = not skip_message.startswith("Skipped by --resume-failed-only:")
                 append_result(
                     ConversionResult(
                         input_path=job.display_input,
-                        output_path=planned_outputs.get(job.sequence),
+                        output_path=plan.planned_outputs.get(job.sequence),
                         status=ConversionStatus.SKIPPED,
                         message=skip_message,
                     ),
@@ -468,7 +383,7 @@ class ConversionService:
                 )
                 continue
 
-            target = planned_outputs[job.sequence]
+            target = plan.planned_outputs[job.sequence]
             if dry_run:
                 results.append(
                     ConversionResult(
@@ -482,7 +397,7 @@ class ConversionService:
             try:
                 # 提前创建输出目录
                 target.parent.mkdir(parents=True, exist_ok=True)
-                should_overwrite = force or job.sequence in overwrite_jobs
+                should_overwrite = force or job.sequence in plan.overwrite_jobs
                 if should_overwrite:
                     resume_state_path(target).unlink(missing_ok=True)
 
@@ -544,6 +459,141 @@ class ConversionService:
             manifest.save()
 
         return RunSummary(results=self._sort_results(results))
+
+    def _plan_jobs(
+        self,
+        *,
+        jobs: Sequence[ConversionJob],
+        batch_mode: bool,
+        output: Path | None,
+        raw_output_path: str | None,
+        resume_failed_only: bool,
+        force: bool,
+        manifest: BatchManifest | None,
+        hash_cache: dict[str, str],
+    ) -> ConversionPlan:
+        plan = ConversionPlan()
+        for job in jobs:
+            try:
+                plan.planned_outputs[job.sequence] = resolve_output_path(
+                    input_path=job.planning_path,
+                    batch_mode=batch_mode,
+                    output_path=output,
+                    raw_output_path=raw_output_path,
+                    source_root=job.source_root,
+                )
+            except OutputPathError as exc:
+                plan.planning_errors[job.sequence] = str(exc)
+
+        for job in jobs:
+            if resume_failed_only and batch_mode:
+                target = plan.planned_outputs.get(job.sequence)
+                if target is None:
+                    continue
+
+                manifest_entry = manifest.get(target) if manifest is not None else None
+                if manifest_entry is None:
+                    plan.planning_skips[job.sequence] = self._resume_failed_only_skip_message(
+                        "no manifest entry"
+                    )
+                    plan.planned_outputs.pop(job.sequence, None)
+                    continue
+
+                if manifest_entry.get("status") != "failed":
+                    plan.planning_skips[job.sequence] = self._resume_failed_only_skip_message(
+                        f"last status is {manifest_entry.get('status', 'unknown')}"
+                    )
+                    plan.planned_outputs.pop(job.sequence, None)
+
+        seen_outputs: dict[Path, ConversionJob] = {}
+        for job in jobs:
+            target = plan.planned_outputs.get(job.sequence)
+            if target is None:
+                continue
+
+            normalized = target.resolve()
+            previous = seen_outputs.get(normalized)
+            if previous is None:
+                seen_outputs[normalized] = job
+                continue
+
+            error = (
+                f"Output path collision: {previous.display_input} and "
+                f"{job.display_input} both map to {target}"
+            )
+            plan.planning_errors[previous.sequence] = error
+            plan.planning_errors[job.sequence] = error
+            plan.planned_outputs.pop(previous.sequence, None)
+            plan.planned_outputs.pop(job.sequence, None)
+
+        for job in jobs:
+            target = plan.planned_outputs.get(job.sequence)
+            if target is None:
+                continue
+
+            if target.exists() and not force:
+                if not has_resume_state(target):
+                    should_remove_planned_output = True
+                    if batch_mode:
+                        manifest_entry = manifest.get(target) if manifest is not None else None
+                        if manifest_entry is None:
+                            plan.planning_skips[job.sequence] = self._already_done_message(target)
+                        else:
+                            current_hash = self._cached_input_hash(job.converter_input, hash_cache)
+                            if (
+                                manifest_entry.get("status") == "converted"
+                                and manifest_entry.get("input_hash") == current_hash
+                            ):
+                                plan.planning_skips[job.sequence] = self._already_done_message(target)
+                            else:
+                                plan.overwrite_jobs.add(job.sequence)
+                                should_remove_planned_output = False
+                    else:
+                        plan.planning_errors[job.sequence] = (
+                            f"Output already exists: {target}. Use --force to overwrite."
+                        )
+                    if should_remove_planned_output:
+                        plan.planned_outputs.pop(job.sequence, None)
+
+        return plan
+
+    def _update_manifest_from_result(
+        self,
+        *,
+        manifest: BatchManifest | None,
+        dry_run: bool,
+        result: ConversionResult,
+        job: ConversionJob | None,
+        hash_cache: dict[str, str],
+        planned_outputs: dict[int, Path],
+        persist_manifest: bool = True,
+    ) -> None:
+        if manifest is None or dry_run or not persist_manifest:
+            return
+
+        input_hash = self._input_hash_for_result(result=result, job=job, hash_cache=hash_cache)
+        if input_hash is None:
+            return
+
+        status = self._manifest_status_for_result(result)
+        if status is None:
+            return
+
+        output_target = result.output_path
+        if output_target is None and job is not None:
+            output_target = planned_outputs.get(job.sequence)
+        if output_target is None:
+            return
+
+        manifest.update(
+            output_path=output_target,
+            input_path=result.input_path,
+            input_hash=input_hash,
+            status=status,
+            last_run_at=self._current_timestamp(),
+            last_error=None if status == "converted" else result.message,
+            task_id=result.task_id,
+        )
 
     @staticmethod
     def _sort_results(results: list[ConversionResult]) -> list[ConversionResult]:
@@ -672,7 +722,7 @@ class ConversionService:
         max_concurrent: int = 5,
         progress_callback: ProgressCallback | None = None,
     ) -> RunSummary:
-        """Async version of run() with concurrent file processing."""
+        """异步批量转换，复用同步路径的规划逻辑并发执行实际转换。"""
         if max_concurrent < 1:
             raise ValueError(f"max_concurrent must be at least 1, got {max_concurrent}")
 
@@ -685,10 +735,38 @@ class ConversionService:
         # Load manifest for batch mode
         manifest = self._load_batch_manifest(batch_mode=batch_mode, output_path=output)
         hash_cache: dict[str, str] = {}
+        plan = self._plan_jobs(
+            jobs=jobs,
+            batch_mode=batch_mode,
+            output=output,
+            raw_output_path=output_path,
+            resume_failed_only=resume_failed_only,
+            force=force,
+            manifest=manifest,
+            hash_cache=hash_cache,
+        )
 
         async def emit_result(result: ConversionResult) -> None:
             if progress_callback is not None:
                 await progress_callback(result)
+
+        async def append_result(
+            result: ConversionResult,
+            *,
+            job: ConversionJob | None = None,
+            persist_manifest: bool = True,
+        ) -> None:
+            results.append(result)
+            self._update_manifest_from_result(
+                manifest=manifest,
+                dry_run=dry_run,
+                result=result,
+                job=job,
+                hash_cache=hash_cache,
+                planned_outputs=plan.planned_outputs,
+                persist_manifest=persist_manifest,
+            )
+            await emit_result(result)
 
         # Emit discovered results
         for result in results:
@@ -697,78 +775,53 @@ class ConversionService:
         if not jobs:
             return RunSummary(results=results)
 
-        # Filter jobs based on resume_failed_only
-        if resume_failed_only and batch_mode and manifest is not None:
-            filtered_jobs = []
-            for job in jobs:
-                try:
-                    planned_output = resolve_output_path(
-                        input_path=job.planning_path,
-                        batch_mode=batch_mode,
-                        output_path=output,
-                        raw_output_path=output_path,
-                        source_root=job.source_root,
-                    )
-                    manifest_entry = manifest.get(planned_output)
-                    if manifest_entry is None:
-                        result = ConversionResult(
-                            input_path=job.display_input,
-                            output_path=planned_output,
-                            status=ConversionStatus.SKIPPED,
-                            message=self._resume_failed_only_skip_message("no manifest entry"),
-                        )
-                        results.append(result)
-                        await emit_result(result)
-                        continue
-
-                    if manifest_entry.get("status") != "failed":
-                        result = ConversionResult(
-                            input_path=job.display_input,
-                            output_path=planned_output,
-                            status=ConversionStatus.SKIPPED,
-                            message=self._resume_failed_only_skip_message(
-                                f"last status is {manifest_entry.get('status', 'unknown')}"
-                            ),
-                        )
-                        results.append(result)
-                        await emit_result(result)
-                        continue
-
-                    filtered_jobs.append(job)
-                except OutputPathError:
-                    filtered_jobs.append(job)
-
-            jobs = filtered_jobs
-
-        if not jobs:
-            return RunSummary(results=self._sort_results(results))
-
-        # Handle dry-run mode
-        if dry_run:
-            for job in jobs:
-                try:
-                    planned_output = resolve_output_path(
-                        input_path=job.planning_path,
-                        batch_mode=batch_mode,
-                        output_path=output,
-                        raw_output_path=output_path,
-                        source_root=job.source_root,
-                    )
-                    result = ConversionResult(
-                        input_path=job.display_input,
-                        output_path=planned_output,
-                        status=ConversionStatus.PLANNED,
-                    )
-                except OutputPathError as exc:
-                    result = ConversionResult(
+        conversion_jobs: list[ConversionJob] = []
+        for job in jobs:
+            error = plan.planning_errors.get(job.sequence)
+            if error is not None:
+                await append_result(
+                    ConversionResult(
                         input_path=job.display_input,
                         output_path=None,
                         status=ConversionStatus.FAILED,
-                        message=str(exc),
-                    )
-                results.append(result)
-                await emit_result(result)
-            return RunSummary(results=results)
+                        message=error,
+                    ),
+                    job=job,
+                )
+                continue
+
+            skip_message = plan.planning_skips.get(job.sequence)
+            if skip_message is not None:
+                persist_manifest = not skip_message.startswith("Skipped by --resume-failed-only:")
+                await append_result(
+                    ConversionResult(
+                        input_path=job.display_input,
+                        output_path=plan.planned_outputs.get(job.sequence),
+                        status=ConversionStatus.SKIPPED,
+                        message=skip_message,
+                    ),
+                    job=job,
+                    persist_manifest=persist_manifest,
+                )
+                continue
+
+            if dry_run:
+                await append_result(
+                    ConversionResult(
+                        input_path=job.display_input,
+                        output_path=plan.planned_outputs[job.sequence],
+                        status=ConversionStatus.PLANNED,
+                    ),
+                    job=job,
+                )
+                continue
+
+            conversion_jobs.append(job)
+
+        if dry_run or not conversion_jobs:
+            if manifest is not None and not dry_run:
+                manifest.save()
+            return RunSummary(results=self._sort_results(results))
 
         semaphore = asyncio.Semaphore(max_concurrent)
         # 初始化音频信号量（限制音频转换并发为1）
@@ -785,40 +838,40 @@ class ConversionService:
                 if is_audio:
                     async with self._audio_semaphore:
                         result = await self._convert_single_async(
-                            job, batch_mode, output, output_path, t2s, force, resume_failed_only
+                            job,
+                            plan.planned_outputs[job.sequence],
+                            t2s,
+                            force or job.sequence in plan.overwrite_jobs,
                         )
                 else:
                     result = await self._convert_single_async(
-                        job, batch_mode, output, output_path, t2s, force, resume_failed_only
+                        job,
+                        plan.planned_outputs[job.sequence],
+                        t2s,
+                        force or job.sequence in plan.overwrite_jobs,
                     )
 
-                # Update manifest
-                if manifest is not None and not dry_run:
-                    input_hash = self._cached_input_hash(job.converter_input, hash_cache)
-                    status = self._manifest_status_for_result(result)
-                    if status is not None and result.output_path is not None:
-                        manifest.update(
-                            output_path=result.output_path,
-                            input_path=result.input_path,
-                            input_hash=input_hash,
-                            status=status,
-                            last_run_at=self._current_timestamp(),
-                            last_error=None if status == "converted" else result.message,
-                            task_id=result.task_id,
-                        )
+                # 更新批量 manifest
+                self._update_manifest_from_result(
+                    manifest=manifest,
+                    dry_run=dry_run,
+                    result=result,
+                    job=job,
+                    hash_cache=hash_cache,
+                    planned_outputs=plan.planned_outputs,
+                )
 
                 await emit_result(result)
                 return result
 
-        # Use asyncio.as_completed for real-time progress
-        tasks = [process_with_semaphore(job) for job in jobs]
+        # 按完成顺序收集结果，进度回调可以实时输出
+        tasks = [process_with_semaphore(job) for job in conversion_jobs]
         for coro in asyncio.as_completed(tasks):
             try:
                 result = await coro
                 results.append(result)
             except Exception as exc:
-                # This should not happen as exceptions are caught in _convert_single_async
-                # But handle it just in case
+                # 正常异常会在 _convert_single_async 中转成失败结果，这里兜底处理意外异常。
                 results.append(
                     ConversionResult(
                         input_path="<unknown>",
@@ -828,7 +881,7 @@ class ConversionService:
                     )
                 )
 
-        # Save manifest
+        # 保存批量 manifest
         if manifest is not None and not dry_run:
             manifest.save()
 
@@ -837,59 +890,16 @@ class ConversionService:
     async def _convert_single_async(
         self,
         job: ConversionJob,
-        batch_mode: bool,
-        output_path: Path | None,
-        raw_output_path: str | None,
+        resolved_output: Path,
         t2s: bool,
-        force: bool,
-        resume_failed_only: bool,
+        allow_existing_output: bool,
     ) -> ConversionResult:
-        """Async version of _convert_single()."""
-        try:
-            resolved_output = resolve_output_path(
-                input_path=job.planning_path,
-                batch_mode=batch_mode,
-                output_path=output_path,
-                raw_output_path=raw_output_path,
-                source_root=job.source_root,
-            )
-        except OutputPathError as exc:
-            return ConversionResult(
-                input_path=job.display_input,
-                output_path=None,
-                status=ConversionStatus.FAILED,
-                message=str(exc),
-            )
+        """在共享规划已确定输出路径后执行单个异步转换。"""
+        if allow_existing_output:
+            resume_state_path(resolved_output).unlink(missing_ok=True)
 
-        # Check resume state (only for non-batch mode or audio resume)
-        if resume_failed_only and not batch_mode:
-            if not has_resume_state(resolved_output):
-                return ConversionResult(
-                    input_path=job.display_input,
-                    output_path=resolved_output,
-                    status=ConversionStatus.SKIPPED,
-                    message=f"Skipped by --resume-failed-only: {resolved_output}",
-                )
-
-        # Check if output exists (non-batch mode should fail, batch mode should skip)
-        if resolved_output.exists() and not force and not has_resume_state(resolved_output):
-            if not batch_mode:
-                return ConversionResult(
-                    input_path=job.display_input,
-                    output_path=None,
-                    status=ConversionStatus.FAILED,
-                    message=f"Output already exists: {resolved_output}. Use --force to overwrite.",
-                )
-            # In batch mode, skip already converted files
-            return ConversionResult(
-                input_path=job.display_input,
-                output_path=resolved_output,
-                status=ConversionStatus.SKIPPED,
-                message=f"Already converted: {resolved_output}",
-            )
-
-        # Async file lock
-        lock_acquired = await self._try_acquire_async_lock(resolved_output, force)
+        # 获取异步输出锁
+        lock_acquired = await self._try_acquire_async_lock(resolved_output, allow_existing_output)
         if not lock_acquired:
             return ConversionResult(
                 input_path=job.display_input,
@@ -899,7 +909,7 @@ class ConversionService:
             )
 
         try:
-            # Use registry.convert() which handles converter selection
+            # 转换器仍是同步接口，放入线程池避免阻塞事件循环。
             markdown = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.registry.convert(
@@ -909,22 +919,22 @@ class ConversionService:
                 )
             )
 
-            # Extract metadata
+            # 提取转换附带的元数据
             conversion_message = None
             source_encoding = getattr(markdown, "source_encoding", None)
             if source_encoding:
                 conversion_message = f"encoding={source_encoding}"
 
-            # Post-process
+            # 应用后处理
             if t2s:
                 markdown = apply_postprocess(markdown, t2s=t2s)
 
-            # Write output
+            # 写入输出文件
             resolved_output.parent.mkdir(parents=True, exist_ok=True)
             async with aiofiles.open(resolved_output, "w", encoding="utf-8") as f:
                 await f.write(markdown)
 
-            # Remove resume state if exists
+            # 转换成功后清理续传状态
             state_path = resume_state_path(resolved_output)
             if await aiofiles.os.path.exists(state_path):
                 await aiofiles.os.remove(state_path)
@@ -955,7 +965,7 @@ class ConversionService:
             await self._release_async_lock(resolved_output)
 
     async def _try_acquire_async_lock(self, output_path: Path, force: bool) -> bool:
-        """Async file lock acquisition."""
+        """异步获取输出锁。"""
         from any2md.io_state import output_lock_path
         lock_path = output_lock_path(output_path)
 

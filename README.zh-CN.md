@@ -56,6 +56,7 @@ ANY2MD_LLM_MODEL=gpt-4.1-mini
 ```
 
 支持 OpenAI 和 Anthropic API，系统会自动检测 API 类型：
+
 - OpenAI 示例：`ANY2MD_LLM_API_BASE=https://api.openai.com/v1`，`ANY2MD_LLM_MODEL=gpt-4o-mini`
 - Anthropic 示例：`ANY2MD_LLM_API_BASE=https://api.anthropic.com/v1`，`ANY2MD_LLM_MODEL=claude-3-5-sonnet-20241022`
 - 如果使用第三方代理且自动检测失败，可手动指定：`ANY2MD_LLM_API_TYPE=anthropic`（可选值：`openai` 或 `anthropic`）

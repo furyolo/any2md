@@ -1,0 +1,31 @@
+{
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "抽取共享转换规划",
+      "description": "把 run() 中的输出规划、冲突检测、resume_failed_only、manifest 哈希判断抽成 ConversionPlan 和 _plan_jobs。",
+      "scope": "src/any2md/app.py",
+      "convergence_criteria": "同步路径行为不变，异步路径复用同一规划结果。",
+      "files": ["src/any2md/app.py"],
+      "status": "completed"
+    },
+    {
+      "id": "T2",
+      "title": "统一 manifest 更新入口",
+      "description": "抽取 _update_manifest_from_result，减少 run() 与 run_async() 对 manifest.update 的重复实现。",
+      "scope": "src/any2md/app.py",
+      "convergence_criteria": "manifest 字段与原同步逻辑一致。",
+      "files": ["src/any2md/app.py"],
+      "status": "completed"
+    },
+    {
+      "id": "T3",
+      "title": "补充异步行为测试",
+      "description": "覆盖异步批量输出冲突、manifest 输入变更重转和 resume_failed_only 过滤。",
+      "scope": "tests/test_async.py",
+      "convergence_criteria": "新增测试失败时能暴露旧异步规划缺口，修改后通过。",
+      "files": ["tests/test_async.py"],
+      "status": "completed"
+    }
+  ]
+}

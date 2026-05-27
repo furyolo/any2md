@@ -1,0 +1,9 @@
+{
+  "task": "修复同步与异步转换逻辑在 src/any2md/app.py 中重复的问题",
+  "flags": {
+    "discuss": false,
+    "full": false
+  },
+  "created_at": "2026-05-27T00:00:00+08:00",
+  "status": "active"
+}
