@@ -638,7 +638,8 @@ class AudioConverter:
 
         local_path = path if isinstance(path, Path) else Path(path)
         raise MediaProcessingError(
-            f"Local audio files are no longer supported: {local_path}. Provide a direct audio URL instead."
+            f"AUC audio backend only supports direct remote audio URLs: {local_path}. "
+            "Use --audio-backend qwen-local for local audio files."
         )
 
     def _convert_from_url(self, url: str) -> str:

@@ -314,7 +314,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("Skipped https://example.com/video.mp4", stderr.getvalue())
         self.assertIn("Unsupported format: .mp4", stderr.getvalue())
 
-    def test_cli_reports_local_audio_file_as_skipped(self) -> None:
+    def test_cli_reports_local_audio_file_as_skipped_with_auc_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "audio.mp3"
@@ -323,7 +323,7 @@ class CliTests(unittest.TestCase):
             stdout = StringIO()
             stderr = StringIO()
             code = main(
-                [str(source)],
+                [str(source), "--audio-backend", "auc"],
                 registry=ConverterRegistry(),
                 stdout=stdout,
                 stderr=stderr,
@@ -332,7 +332,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertEqual(stdout.getvalue(), "")
             self.assertIn("Skipped", stderr.getvalue())
-            self.assertIn("Local audio files are no longer supported", stderr.getvalue())
+            self.assertIn("Local audio files require the qwen-local backend", stderr.getvalue())
 
     def test_cli_accepts_local_audio_file_with_qwen_local_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

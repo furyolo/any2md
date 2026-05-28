@@ -1,0 +1,9 @@
+{
+  "status": "active",
+  "task": "修复本地音频历史文案残留",
+  "created_at": "2026-05-28T00:44:52.1015081Z",
+  "flags": {
+    "full": false,
+    "discuss": false
+  }
+}

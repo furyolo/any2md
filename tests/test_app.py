@@ -91,7 +91,7 @@ class AppTests(unittest.TestCase):
             self.assertEqual(summary.skipped_count, 1)
             self.assertEqual(summary.exit_code, 1)
             self.assertIn(
-                "Local audio files are no longer supported",
+                "Local audio files require the qwen-local backend",
                 summary.results[0].message or "",
             )
 

@@ -186,7 +186,7 @@ class ConverterTests(unittest.TestCase):
         with self.assertRaises(MediaProcessingError) as context:
             converter(Path("demo.mp3"))
 
-        self.assertIn("Local audio files are no longer supported", str(context.exception))
+        self.assertIn("AUC audio backend only supports direct remote audio URLs", str(context.exception))
 
     def test_local_qwen_audio_converter_transcribes_local_file(self) -> None:
         executed: list[list[str]] = []

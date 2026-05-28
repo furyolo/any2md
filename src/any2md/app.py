@@ -606,7 +606,10 @@ class ConversionService:
 
     @staticmethod
     def _local_audio_message() -> str:
-        return "Local audio files are no longer supported. Provide a direct audio URL instead."
+        return (
+            "Local audio files require the qwen-local backend. "
+            "Use --audio-backend qwen-local or provide a direct audio URL for AUC."
+        )
 
     @staticmethod
     def _already_done_message(output_path: Path) -> str:
