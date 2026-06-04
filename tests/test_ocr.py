@@ -105,7 +105,7 @@ class OcrTests(unittest.TestCase):
         self.assertEqual(result, "# 标题\n\n正文")
         self.assertEqual(captured["url"], "https://example.com/v1/chat/completions")
         self.assertEqual(captured["timeout"], 12.5)
-        self.assertEqual(captured["headers"]["Authorization"], "Bearer secret-key")
+        self.assertEqual(_header(captured["headers"], "Authorization"), "Bearer secret-key")
         payload = captured["payload"]
         self.assertEqual(payload["model"], "demo-model")
         self.assertEqual(payload["messages"][0]["content"][0]["text"], "请输出 Markdown")
@@ -176,14 +176,60 @@ class OcrTests(unittest.TestCase):
 
         self.assertEqual(result, "# 标题\n\n正文")
         self.assertEqual(captured["url"], "https://api.anthropic.com/v1/messages")
-        self.assertEqual(captured["headers"]["x-api-key"], "sk-ant-secret")
-        self.assertEqual(captured["headers"]["anthropic-version"], "2023-06-01")
+        self.assertEqual(_header(captured["headers"], "x-api-key"), "sk-ant-secret")
+        self.assertEqual(_header(captured["headers"], "anthropic-version"), "2023-06-01")
         payload = captured["payload"]
         self.assertEqual(payload["model"], "claude-3-5-sonnet-20241022")
         self.assertEqual(payload["max_tokens"], 4096)
         self.assertEqual(payload["messages"][0]["content"][0]["text"], "请输出 Markdown")
         self.assertEqual(payload["messages"][0]["content"][1]["type"], "image")
         self.assertEqual(payload["messages"][0]["content"][1]["source"]["type"], "base64")
+
+    def test_llm_ocr_engine_supports_glm_ocr_layout_parsing_api(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_http_client(request, timeout):
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeHttpResponse({"md_results": "# 标题\n\n正文"})
+
+        settings = LlmOcrSettings(
+            api_base="https://open.bigmodel.cn/api",
+            api_key="zhipu-secret",
+            model="glm-ocr",
+            timeout=20.0,
+            api_type="glm_ocr",
+        )
+
+        case_dir = _make_case_dir()
+        try:
+            image_path = case_dir / "sample.png"
+            image_path.write_bytes(b"fake-image")
+            engine = LlmVisionOcrEngine(settings=settings, http_client=fake_http_client)
+
+            result = engine.extract_text(image_path)
+        finally:
+            shutil.rmtree(case_dir, ignore_errors=True)
+
+        self.assertEqual(result, "# 标题\n\n正文")
+        self.assertEqual(captured["url"], "https://open.bigmodel.cn/api/paas/v4/layout_parsing")
+        self.assertEqual(_header(captured["headers"], "Authorization"), "Bearer zhipu-secret")
+        payload = captured["payload"]
+        self.assertEqual(payload["model"], "glm-ocr")
+        self.assertTrue(payload["file"].startswith("data:image/png;base64,"))
+
+    def test_resolve_llm_ocr_settings_accepts_glm_ocr_api_type(self) -> None:
+        settings = resolve_llm_ocr_settings(
+            environ={
+                "ANY2MD_LLM_API_BASE": "https://open.bigmodel.cn/api",
+                "ANY2MD_LLM_API_KEY": "zhipu-secret",
+                "ANY2MD_LLM_MODEL": "glm-ocr",
+                "ANY2MD_LLM_API_TYPE": "glm_ocr",
+            }
+        )
+
+        self.assertEqual(settings.api_type, "glm_ocr")
 
 
 def _tracked_env_keys() -> tuple[str, ...]:
@@ -193,6 +239,7 @@ def _tracked_env_keys() -> tuple[str, ...]:
         "ANY2MD_LLM_MODEL",
         "ANY2MD_LLM_TIMEOUT",
         "ANY2MD_OCR_PROMPT",
+        "ANY2MD_LLM_API_TYPE",
     )
 
 
@@ -202,6 +249,14 @@ def _restore_env(original: dict[str, str | None]) -> None:
             os.environ.pop(key, None)
         else:
             os.environ[key] = value
+
+
+def _header(headers: dict[str, str], name: str) -> str:
+    lowered = name.lower()
+    for key, value in headers.items():
+        if key.lower() == lowered:
+            return value
+    raise KeyError(name)
 
 
 def _make_case_dir() -> Path:

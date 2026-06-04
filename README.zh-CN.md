@@ -26,7 +26,7 @@
 - 可用 `--manifest-list` / `--manifest-status` 直接查看批量任务清单和失败项。
 - 可用 `--manifest-prune` 清理 manifest 中已失效的输出记录。
 - 支持用 `--t2s` 在提取完成后执行繁体转简体。
-- 图片 OCR 使用兼容 OpenAI 的视觉聊天模型，输出 Markdown，并清理常见 OCR 包装文本。
+- 图片 OCR 支持 OpenAI/Anthropic 视觉聊天模型和 GLM-OCR 文档解析接口，输出 Markdown，并清理常见 OCR 包装文本。
 - 音频转录默认使用本地 Qwen3-ASR-1.7B，可通过 `--audio-backend auc` 选择字节跳动 AUC 支持。
 
 ## 快速开始
@@ -55,11 +55,12 @@ ANY2MD_LLM_API_KEY=sk-your-api-key
 ANY2MD_LLM_MODEL=gpt-4.1-mini
 ```
 
-支持 OpenAI 和 Anthropic API，系统会自动检测 API 类型：
+支持 OpenAI、Anthropic 和 GLM-OCR API，系统会自动检测 API 类型：
 
 - OpenAI 示例：`ANY2MD_LLM_API_BASE=https://api.openai.com/v1`，`ANY2MD_LLM_MODEL=gpt-4o-mini`
 - Anthropic 示例：`ANY2MD_LLM_API_BASE=https://api.anthropic.com/v1`，`ANY2MD_LLM_MODEL=claude-3-5-sonnet-20241022`
-- 如果使用第三方代理且自动检测失败，可手动指定：`ANY2MD_LLM_API_TYPE=anthropic`（可选值：`openai` 或 `anthropic`）
+- GLM-OCR 示例：`ANY2MD_LLM_API_BASE=https://open.bigmodel.cn/api`，`ANY2MD_LLM_MODEL=glm-ocr`，`ANY2MD_LLM_API_TYPE=glm_ocr`
+- 如果使用第三方代理且自动检测失败，可手动指定：`ANY2MD_LLM_API_TYPE=anthropic`（可选值：`openai`、`anthropic` 或 `glm_ocr`）
 
 **音频转录：**
 
@@ -82,9 +83,9 @@ ANY2MD_QWEN_AUDIO_DTYPE=float32
 
 说明：
 
-- `ANY2MD_LLM_API_BASE` 既可以填写兼容 OpenAI 的服务根地址，也支持直接填写完整的 `/chat/completions` 地址。
+- `ANY2MD_LLM_API_BASE` 既可以填写兼容 OpenAI 的服务根地址，也支持直接填写完整的 `/chat/completions` 地址；使用 GLM-OCR 时填写 `https://open.bigmodel.cn/api` 或完整的 `/paas/v4/layout_parsing` 地址。
 - `ANY2MD_LLM_API_KEY` 是对应服务的 API Key。
-- `ANY2MD_LLM_MODEL` 需要是支持图片输入的视觉模型。
+- `ANY2MD_LLM_MODEL` 需要是支持图片输入的视觉模型；使用 GLM-OCR 时填写 `glm-ocr`。
 - `ANY2MD_AUC_APP_ID` 和 `ANY2MD_AUC_ACCESS_KEY` 是字节跳动 AUC API 凭证。
 - `ANY2MD_QWEN_AUDIO_EXECUTABLE` 和 `ANY2MD_QWEN_AUDIO_MODEL` 用于配置本地 Qwen3-ASR 运行时。
 - `ANY2MD_QWEN_AUDIO_RUNTIME=qwen-asr` 是当前默认推荐方案，`ANY2MD_QWEN_AUDIO_MODEL` 可直接填写官方模型 ID，首次运行会自动下载。
@@ -264,7 +265,7 @@ uv run any2md input.docx --output output/
 
 ## 已知限制
 
-- 图片 OCR 支持 OpenAI 和 Anthropic 兼容的视觉模型，系统会根据 URL 或模型名称自动检测 API 类型。
+- 图片 OCR 支持 OpenAI/Anthropic 兼容的视觉模型和 GLM-OCR 文档解析接口，系统会根据 URL 或模型名称自动检测 API 类型。
 - 本地音频文件默认支持（Qwen3-ASR 模式）。
 - 使用 AUC 模式（`--audio-backend auc`）时，音频文件必须能通过直接 URL 访问。
 - 提取质量依赖源文档质量以及上游解析库能力。
@@ -274,7 +275,7 @@ uv run any2md input.docx --output output/
 ## 说明
 
 - `--t2s` 会按需加载 OpenCC，并在提取完成后执行繁体转简体。
-- 图片转换支持 OpenAI 和 Anthropic 兼容的视觉模型进行 OCR，系统会自动检测 API 类型并使用相应的端点格式（OpenAI: `/v1/chat/completions`，Anthropic: `/v1/messages`）。
+- 图片转换支持 OpenAI/Anthropic 兼容的视觉模型和 GLM-OCR 文档解析接口进行 OCR，系统会自动检测 API 类型并使用相应的端点格式（OpenAI: `/v1/chat/completions`，Anthropic: `/v1/messages`，GLM-OCR: `/paas/v4/layout_parsing`）。
 - 音频转换默认使用本地 Qwen3-ASR，可通过 `--audio-backend auc` 选择字节跳动 AUC 支持。
 - 视频文件会自动提取音轨后，使用选定的音频后端进行转录。
 - 无论是不支持的文件直接传入，还是在目录扫描中发现，都会被标记为跳过。

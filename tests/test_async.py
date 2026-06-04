@@ -132,6 +132,46 @@ class OcrAsyncTests(unittest.TestCase):
         result = asyncio.run(run_test())
         self.assertEqual(result, "OCR result text")
 
+    def test_ocr_image_async_supports_glm_ocr_layout_parsing_api(self):
+        async def run_test():
+            from any2md.ocr import ocr_image_async, LlmOcrSettings
+
+            settings = LlmOcrSettings(
+                api_base="https://open.bigmodel.cn/api",
+                api_key="zhipu-secret",
+                model="glm-ocr",
+                api_type="glm_ocr",
+            )
+
+            with tempfile.TemporaryDirectory() as tmp:
+                image_path = Path(tmp) / "test.png"
+                image_path.write_bytes(b"fake-image-data")
+
+                with patch("httpx.AsyncClient") as mock_client_class:
+                    mock_client = AsyncMock()
+                    mock_response = MagicMock()
+                    mock_response.json.return_value = {"md_results": "# 标题\n\n正文"}
+                    mock_response.raise_for_status = MagicMock()
+                    mock_client.post = AsyncMock(return_value=mock_response)
+                    mock_client.__aenter__.return_value = mock_client
+                    mock_client.__aexit__.return_value = AsyncMock()
+                    mock_client_class.return_value = mock_client
+
+                    result = await ocr_image_async(image_path, settings)
+                    args, kwargs = mock_client.post.call_args
+
+                    return result, args, kwargs
+
+        result, args, kwargs = asyncio.run(run_test())
+        self.assertEqual(result, "# 标题\n\n正文")
+        self.assertEqual(args[0], "https://open.bigmodel.cn/api/paas/v4/layout_parsing")
+        self.assertEqual(kwargs["json"]["model"], "glm-ocr")
+        self.assertTrue(kwargs["json"]["file"].startswith("data:image/png;base64,"))
+        self.assertEqual(
+            kwargs["headers"]["Authorization"],
+            "Bearer zhipu-secret",
+        )
+
 
 class ConversionServiceAsyncTests(unittest.TestCase):
     def test_run_async_processes_files_concurrently(self):

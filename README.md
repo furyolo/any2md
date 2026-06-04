@@ -26,7 +26,7 @@ Convert common document formats into Markdown from the command line.
 - You can use `--manifest-list` / `--manifest-status` to inspect batch manifests and failed items directly.
 - You can use `--manifest-prune` to remove stale manifest entries whose outputs no longer exist.
 - Use `--t2s` to convert Traditional Chinese text to Simplified Chinese after extraction.
-- Use OpenAI-compatible vision chat models for image OCR, return Markdown, and clean common OCR wrapper text.
+- Use OpenAI/Anthropic vision chat models or the GLM-OCR layout parsing API for image OCR, return Markdown, and clean common OCR wrapper text.
 - Use ByteDance AUC API or local Qwen3-ASR-1.7B runtime for audio transcription.
 
 ## Quick Start
@@ -55,10 +55,11 @@ ANY2MD_LLM_API_KEY=sk-your-api-key
 ANY2MD_LLM_MODEL=gpt-4.1-mini
 ```
 
-Supports both OpenAI and Anthropic APIs with automatic detection:
+Supports OpenAI, Anthropic, and GLM-OCR APIs with automatic detection:
 - OpenAI example: `ANY2MD_LLM_API_BASE=https://api.openai.com/v1`, `ANY2MD_LLM_MODEL=gpt-4o-mini`
 - Anthropic example: `ANY2MD_LLM_API_BASE=https://api.anthropic.com/v1`, `ANY2MD_LLM_MODEL=claude-3-5-sonnet-20241022`
-- For third-party proxies where auto-detection fails, manually specify: `ANY2MD_LLM_API_TYPE=anthropic` (options: `openai` or `anthropic`)
+- GLM-OCR example: `ANY2MD_LLM_API_BASE=https://open.bigmodel.cn/api`, `ANY2MD_LLM_MODEL=glm-ocr`, `ANY2MD_LLM_API_TYPE=glm_ocr`
+- For third-party proxies where auto-detection fails, manually specify: `ANY2MD_LLM_API_TYPE=anthropic` (options: `openai`, `anthropic`, or `glm_ocr`)
 
 **For audio transcription:**
 
@@ -81,9 +82,9 @@ ANY2MD_QWEN_AUDIO_DTYPE=float32
 
 Notes:
 
-- `ANY2MD_LLM_API_BASE` can be either an OpenAI-compatible base URL or a full `/chat/completions` endpoint.
+- `ANY2MD_LLM_API_BASE` can be either an OpenAI-compatible base URL or a full `/chat/completions` endpoint. For GLM-OCR, use `https://open.bigmodel.cn/api` or a full `/paas/v4/layout_parsing` endpoint.
 - `ANY2MD_LLM_API_KEY` is the API key for that service.
-- `ANY2MD_LLM_MODEL` must be a vision-capable model.
+- `ANY2MD_LLM_MODEL` must be a vision-capable model. For GLM-OCR, use `glm-ocr`.
 - `ANY2MD_AUC_APP_ID` and `ANY2MD_AUC_ACCESS_KEY` are ByteDance AUC API credentials.
 - `ANY2MD_QWEN_AUDIO_EXECUTABLE` and `ANY2MD_QWEN_AUDIO_MODEL` configure the local Qwen3-ASR runtime.
 - `ANY2MD_QWEN_AUDIO_RUNTIME=qwen-asr` is the recommended default; `ANY2MD_QWEN_AUDIO_MODEL` can be an official model ID and will download on first use.
@@ -267,7 +268,7 @@ uv run any2md input.docx --output output/
 
 ## Known limitations
 
-- Image OCR supports OpenAI and Anthropic-compatible vision models, with automatic API type detection based on URL or model name.
+- Image OCR supports OpenAI/Anthropic-compatible vision models and the GLM-OCR layout parsing API, with automatic API type detection based on URL or model name.
 - Local audio file paths are supported by default (Qwen3-ASR mode).
 - When using AUC mode (`--audio-backend auc`), audio files must be accessible via direct URL.
 - Extraction quality depends on the source document quality and the upstream parsing libraries.
@@ -277,7 +278,7 @@ uv run any2md input.docx --output output/
 ## Notes
 
 - `--t2s` lazily loads OpenCC and applies Traditional-to-Simplified Chinese conversion after extraction.
-- Image conversion supports OpenAI and Anthropic-compatible vision models for OCR, with automatic API type detection and appropriate endpoint formatting (OpenAI: `/v1/chat/completions`, Anthropic: `/v1/messages`).
+- Image conversion supports OpenAI/Anthropic-compatible vision models and the GLM-OCR layout parsing API for OCR, with automatic API type detection and appropriate endpoint formatting (OpenAI: `/v1/chat/completions`, Anthropic: `/v1/messages`, GLM-OCR: `/paas/v4/layout_parsing`).
 - Audio conversion uses local Qwen3-ASR by default, with optional ByteDance AUC support via `--audio-backend auc`.
 - Video files are automatically processed by extracting audio tracks first, then transcribed using the selected audio backend.
 - Unsupported files are reported as skipped whether they are passed directly or discovered during directory scanning.

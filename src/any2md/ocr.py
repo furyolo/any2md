@@ -34,7 +34,7 @@ class LlmOcrSettings:
     model: str
     timeout: float = 60.0
     prompt: str = DEFAULT_OCR_PROMPT
-    api_type: str | None = None  # "openai" or "anthropic", auto-detected if None
+    api_type: str | None = None  # "openai", "anthropic", or "glm_ocr"; auto-detected if None
 
 
 def load_env_file(env_path: Path | None = None, *, override: bool = False) -> dict[str, str]:
@@ -109,9 +109,9 @@ def resolve_llm_ocr_settings(
             ) from exc
 
     # Validate api_type if provided
-    if api_type and api_type not in ("openai", "anthropic"):
+    if api_type and api_type not in ("openai", "anthropic", "glm_ocr"):
         raise OcrNotConfiguredError(
-            f"无效的 API 类型：{api_type}。请设置为 'openai' 或 'anthropic'。"
+            f"无效的 API 类型：{api_type}。请设置为 'openai'、'anthropic' 或 'glm_ocr'。"
         )
 
     return LlmOcrSettings(
@@ -203,11 +203,15 @@ def _detect_api_type(api_base: str, model: str) -> str:
     normalized = api_base.lower()
 
     # Check URL patterns
+    if "layout_parsing" in normalized:
+        return "glm_ocr"
     if "anthropic" in normalized or "claude" in normalized:
         return "anthropic"
 
     # Check model name patterns
     model_lower = model.lower()
+    if model_lower == "glm-ocr":
+        return "glm_ocr"
     if model_lower.startswith("claude"):
         return "anthropic"
 
@@ -218,6 +222,13 @@ def _detect_api_type(api_base: str, model: str) -> str:
 def _resolve_api_endpoint(api_base: str, api_type: str) -> str:
     """Resolve the correct API endpoint based on API type."""
     normalized = api_base.rstrip("/")
+
+    if api_type == "glm_ocr":
+        if normalized.endswith("/paas/v4/layout_parsing"):
+            return normalized
+        if normalized.endswith("/api"):
+            return f"{normalized}/paas/v4/layout_parsing"
+        return f"{normalized}/api/paas/v4/layout_parsing"
 
     if api_type == "anthropic":
         # Anthropic uses /v1/messages or /v1/responses
@@ -242,6 +253,12 @@ def _build_api_payload(
     api_type: str,
 ) -> dict:
     """Build API request payload based on API type."""
+    if api_type == "glm_ocr":
+        return {
+            "model": settings.model,
+            "file": f"data:{mime_type};base64,{encoded_image}",
+        }
+
     if api_type == "anthropic":
         # Anthropic Messages API format
         return {
@@ -304,6 +321,10 @@ def _build_api_headers(api_key: str, api_type: str) -> dict[str, str]:
 
 def _extract_message_content(payload: dict[str, object], api_type: str) -> str:
     """Extract text content from API response based on API type."""
+    if api_type == "glm_ocr":
+        content = payload.get("md_results")
+        return content.strip() if isinstance(content, str) else ""
+
     if api_type == "anthropic":
         # Anthropic Messages API response format
         content = payload.get("content")
