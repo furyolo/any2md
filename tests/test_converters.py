@@ -71,6 +71,10 @@ class FakeRenderer:
 
 
 class ConverterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # 重置类级共享模型缓存，避免用例间状态污染
+        QwenAsrAudioConverter._shared_model = None
+
     @patch("any2md.converters.pdf.pymupdf4llm.to_markdown", return_value="pdf-markdown")
     def test_pdf_converter_delegates_to_pymupdf4llm(self, mocked) -> None:
         path = Path("sample.pdf")

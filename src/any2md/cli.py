@@ -237,7 +237,6 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
             or args.dry_run
             or args.force
             or args.no_wait
-            or args.audio_backend != "auc"
             or args.qwen_runtime is not None
             or args.qwen_executable
             or args.qwen_model
@@ -262,7 +261,6 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
             or args.dry_run
             or args.force
             or args.no_wait
-            or args.audio_backend != "auc"
             or args.qwen_runtime is not None
             or args.qwen_executable
             or args.qwen_model
@@ -291,7 +289,6 @@ def _validate_args(parser: argparse.ArgumentParser, args) -> None:
             or args.dry_run
             or args.force
             or args.no_wait
-            or args.audio_backend != "auc"
             or args.qwen_runtime is not None
             or args.qwen_executable
             or args.qwen_model

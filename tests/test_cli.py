@@ -73,7 +73,7 @@ class CliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         code = main(
-            ["https://example.com/audio.mp3", "--no-wait"],
+            ["https://example.com/audio.mp3", "--audio-backend", "auc", "--no-wait"],
             stdout=stdout,
             stderr=stderr,
         )
