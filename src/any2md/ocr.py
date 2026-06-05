@@ -10,8 +10,6 @@ from typing import Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-import httpx
-
 from any2md.errors import OcrNotConfiguredError, OcrRequestError
 
 
@@ -386,90 +384,3 @@ def _strip_markdown_fence(content: str) -> str:
     if body and body[0].strip().lower() in {"markdown", "md"}:
         body = body[1:]
     return "\n".join(body).strip()
-
-
-async def ocr_image_async(
-    image_path: Path,
-    settings: LlmOcrSettings,
-    *,
-    on_progress: Callable[[str], None] | None = None,
-) -> str:
-    """
-    Asynchronously perform OCR on an image using LLM vision API.
-
-    Args:
-        image_path: Path to the image file
-        settings: LLM OCR configuration settings
-        on_progress: Optional callback for progress updates
-
-    Returns:
-        Extracted text in Markdown format
-
-    Raises:
-        OcrNotConfiguredError: If settings are incomplete
-        OcrRequestError: If the API request fails
-    """
-    if not settings.api_base or not settings.api_key or not settings.model:
-        raise OcrNotConfiguredError(
-            "LLM OCR requires api_base, api_key, and model to be configured"
-        )
-
-    if on_progress:
-        on_progress(f"Reading image: {image_path.name}")
-
-    # Detect API type
-    api_type = settings.api_type or _detect_api_type(settings.api_base, settings.model)
-
-    # Encode image to base64
-    image_bytes = image_path.read_bytes()
-    encoded_image = base64.b64encode(image_bytes).decode("ascii")
-    mime_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
-
-    # Build request payload and headers based on API type
-    payload = _build_api_payload(settings, encoded_image, mime_type, api_type)
-    headers = _build_api_headers(settings.api_key, api_type)
-    endpoint = _resolve_api_endpoint(settings.api_base, api_type)
-
-    if on_progress:
-        on_progress(f"Sending OCR request to {settings.model}")
-
-    try:
-        async with httpx.AsyncClient(timeout=settings.timeout) as client:
-            response = await client.post(
-                endpoint,
-                json=payload,
-                headers=headers,
-            )
-            response.raise_for_status()
-            result = response.json()
-
-    except httpx.HTTPStatusError as e:
-        error_detail = ""
-        try:
-            error_body = e.response.json()
-            error_detail = error_body.get("error", {}).get("message", str(error_body))
-        except Exception:
-            error_detail = e.response.text
-
-        raise OcrRequestError(
-            f"OCR API request failed with status {e.response.status_code}: {error_detail}"
-        ) from e
-
-    except httpx.TimeoutException as e:
-        raise OcrRequestError(
-            f"OCR request timed out after {settings.timeout}s"
-        ) from e
-
-    except httpx.RequestError as e:
-        raise OcrRequestError(f"OCR request failed: {e}") from e
-
-    except Exception as e:
-        raise OcrRequestError(f"Unexpected error during OCR: {e}") from e
-
-    text = _extract_message_content(result, api_type)
-    cleaned = _strip_markdown_fence(text)
-
-    if on_progress:
-        on_progress(f"OCR completed: {len(cleaned)} characters extracted")
-
-    return cleaned
